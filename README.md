@@ -13,7 +13,7 @@ This repository serves as a monorepo for various utilities, tools, and experimen
 
 ---
 
-## ⚖️ Accreditation & Usage
+## Accreditation & Usage
 
 This code is open for anyone to use, study, or modify. However, proper attribution is requested to acknowledge the human curation and prompting behind these results.
 
@@ -23,7 +23,7 @@ If you use this code or these concepts in your own projects, please include the 
 > **Original Concept & Architecture by Mateo Coto aka Nostalgintosh**
 > *Generated via AppsByClaude*
 
-## 🛠️ General Setup
+## General Setup
 
 Since this is a monorepo, each application resides in its own folder with its own specific dependencies.
 
