@@ -20,7 +20,7 @@ This code is open for anyone to use, study, or modify. However, proper attributi
 ### How to Credit
 If you use this code or these concepts in your own projects, please include the following line in your project's README or Credits section:
 
-> **Original Concept & Architecture by Mateo Coto (Nostalgintosh)**
+> **Original Concept & Architecture by Mateo Coto aka Nostalgintosh**
 > *Generated via AppsByClaude*
 
 ## 🛠️ General Setup
