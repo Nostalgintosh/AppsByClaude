@@ -8,7 +8,7 @@ This repository serves as a monorepo for various utilities, tools, and experimen
 
 | App Name | Description | Tech Stack |
 |----------|-------------|------------|
-| **[Timecard App](./Timecard-App)** | A retro-styled employee time tracking tool featuring inclusive language support (Louisiana Creole, Pennsylvania Dutch) and a utilitarian aesthetic. | React, JSX, Tailwind |
+| **[Timecard App]([./Timecard-App](https://github.com/Nostalgintosh/AppsByClaude/blob/main/timecard-app.jsx))** | A retro-styled employee time tracking tool featuring inclusive language support (Louisiana Creole, Pennsylvania Dutch) and a utilitarian aesthetic. | React, JSX, Tailwind |
 | *More coming soon...* | | |
 
 ---
