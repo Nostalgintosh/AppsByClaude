@@ -27,3 +27,6 @@ Allow users to create and delete profiles. Fix the Delete button so it functions
 
 ### Theid Prompt: Language settings
 Add translation options in the configuration settings for English, Spanish, and Haitian Creole. Include additional regional languages where possible, for example Louisiana Creole and Pennsylvania Dutch.
+
+### Fromat layout redesign
+One the you get a payday all your hour will automatically group itself into a folder to make the history timeline more simple and organize. on the top of  current time card and below the profile card, create three clickable card that toggles, "PUNCHING," "HISTORY," & "SETTING" to make it easier for user and to show a complete picture.
