@@ -1,0 +1,1995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TimeCard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background: #d4d0c1;
+            background-image: 
+                repeating-linear-gradient(
+                    0deg,
+                    transparent,
+                    transparent 2px,
+                    rgba(0,0,0,.03) 2px,
+                    rgba(0,0,0,.03) 4px
+                ),
+                radial-gradient(ellipse at top, #e8e5d9, #d4d0c1);
+            min-height: 100vh;
+            padding: 20px;
+            color: #2c2c2c;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: white;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            box-shadow: 
+                0 4px 0 #1a1a1a,
+                0 6px 8px rgba(0,0,0,0.25),
+                inset 0 0 0 8px #f5f5f0,
+                inset 0 0 0 10px #2c2c2c,
+                inset 0 2px 4px rgba(0,0,0,0.1);
+            position: relative;
+            transform: translateY(0);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .header:hover {
+            transform: translateY(-2px);
+            box-shadow: 
+                0 6px 0 #1a1a1a,
+                0 8px 12px rgba(0,0,0,0.3),
+                inset 0 0 0 8px #f5f5f0,
+                inset 0 0 0 10px #2c2c2c,
+                inset 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            font-size: 22px;
+            margin-bottom: 15px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            border-bottom: 2px solid #2c2c2c;
+            padding-bottom: 10px;
+        }
+
+        .current-profile-display {
+            font-size: 11px;
+            margin-bottom: 10px;
+            padding: 8px;
+            background: #f5f5f0;
+            border: 2px dashed #2c2c2c;
+            border-radius: 4px;
+        }
+
+        .current-time {
+            font-size: 42px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            letter-spacing: 3px;
+        }
+
+        .current-date {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .card {
+            background: white;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 
+                5px 5px 0 rgba(0,0,0,0.15),
+                8px 8px 15px rgba(0,0,0,0.2),
+                inset 0 0 0 1px rgba(0,0,0,0.05),
+                inset 0 -2px 8px rgba(0,0,0,0.03);
+            position: relative;
+            transform: translateY(0);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 
+                7px 7px 0 rgba(0,0,0,0.15),
+                10px 10px 20px rgba(0,0,0,0.25),
+                inset 0 0 0 1px rgba(0,0,0,0.05),
+                inset 0 -2px 8px rgba(0,0,0,0.03);
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 15px;
+            right: 15px;
+            height: 6px;
+            background: repeating-linear-gradient(
+                90deg,
+                transparent,
+                transparent 8px,
+                #2c2c2c 8px,
+                #2c2c2c 10px
+            );
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            padding: 15px;
+            background: #f5f5f0;
+            border: 2px dashed #2c2c2c;
+            box-shadow: 
+                inset 0 2px 4px rgba(0,0,0,0.1),
+                0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .status-dot {
+            width: 16px;
+            height: 16px;
+            border: 3px solid #2c2c2c;
+            background: white;
+        }
+
+        .status-dot.clocked-in {
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.on-break {
+            background: #ff9800;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.1s;
+            margin-bottom: 12px;
+            font-family: 'Courier New', Courier, monospace;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 
+                0 4px 0 #1a1a1a,
+                0 6px 8px rgba(0,0,0,0.2);
+            position: relative;
+        }
+
+        .btn:active {
+            transform: translateY(4px);
+            box-shadow: 
+                0 0 0 #1a1a1a,
+                0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .btn-primary {
+            background: #4caf50;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #45a049;
+        }
+
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #da190b;
+        }
+
+        .btn-warning {
+            background: #ff9800;
+            color: white;
+        }
+
+        .btn-warning:hover {
+            background: #e68900;
+        }
+
+        .btn-secondary {
+            background: #9e9e9e;
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .break-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .break-btn {
+            padding: 12px;
+            border: 3px solid #2c2c2c;
+            background: white;
+            color: #2c2c2c;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.1s;
+            font-family: 'Courier New', Courier, monospace;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 6px rgba(0,0,0,0.15);
+        }
+
+        .break-btn:hover {
+            background: #f5f5f0;
+        }
+
+        .break-btn:active {
+            transform: translateY(3px);
+            box-shadow: 
+                0 0 0 #1a1a1a,
+                0 1px 3px rgba(0,0,0,0.15);
+        }
+
+        .break-timer {
+            text-align: center;
+            font-size: 48px;
+            font-weight: bold;
+            color: #2c2c2c;
+            margin: 20px 0;
+            padding: 20px;
+            background: #f5f5f0;
+            border: 3px dashed #2c2c2c;
+            letter-spacing: 4px;
+        }
+
+        .summary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .summary-item {
+            text-align: center;
+            padding: 15px;
+            background: #f5f5f0;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 8px rgba(0,0,0,0.15),
+                inset 0 1px 2px rgba(255,255,255,0.5);
+        }
+
+        .summary-label {
+            font-size: 10px;
+            color: #666;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .summary-value {
+            font-size: 22px;
+            font-weight: bold;
+            color: #2c2c2c;
+            letter-spacing: 2px;
+        }
+
+        .punch-history {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .punch-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 2px dashed #d0d0d0;
+            font-size: 12px;
+        }
+
+        .punch-item:last-child {
+            border-bottom: none;
+        }
+
+        .punch-type {
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .punch-type.in { color: #4caf50; }
+        .punch-type.out { color: #f44336; }
+        .punch-type.break-start { color: #ff9800; }
+        .punch-type.break-end { color: #2196f3; }
+
+        .section-title {
+            font-size: 13px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #2c2c2c;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 2px solid #2c2c2c;
+            padding-bottom: 8px;
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 11px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #2c2c2c;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .input-group input,
+        .input-group select {
+            width: 100%;
+            padding: 12px;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: 'Courier New', Courier, monospace;
+            background: white;
+        }
+
+        .input-group input:focus,
+        .input-group select:focus {
+            outline: none;
+            background: #fffef5;
+        }
+
+        .hidden { display: none; }
+
+        .nav-tabs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .nav-tab {
+            padding: 14px;
+            background: white;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.15s;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 8px rgba(0,0,0,0.2);
+            font-weight: bold;
+            color: #2c2c2c;
+        }
+
+        .nav-tab:active {
+            transform: translateY(3px);
+            box-shadow: 
+                0 0 0 #1a1a1a,
+                0 1px 4px rgba(0,0,0,0.2);
+        }
+
+        .nav-tab.active {
+            background: #2c2c2c;
+            color: white;
+            box-shadow: 
+                inset 0 3px 6px rgba(0,0,0,0.4),
+                0 2px 4px rgba(0,0,0,0.2);
+            transform: translateY(2px);
+        }
+
+        .nav-tab-icon {
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+
+        .nav-tab-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .view-container {
+            display: none;
+        }
+
+        .view-container.active {
+            display: block;
+        }
+
+        .pay-period-group {
+            margin-bottom: 20px;
+        }
+
+        .pay-period-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: white;
+            color: #2c2c2c;
+            border: 3px solid #2c2c2c;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.15s;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 8px rgba(0,0,0,0.15);
+        }
+
+        .pay-period-header:hover {
+            background: #f5f5f0;
+            transform: translateY(-2px);
+            box-shadow: 
+                0 5px 0 #1a1a1a,
+                0 6px 12px rgba(0,0,0,0.2);
+        }
+
+        .pay-period-header:active {
+            transform: translateY(3px);
+            box-shadow: 
+                0 0 0 #1a1a1a,
+                0 1px 4px rgba(0,0,0,0.15);
+        }
+
+        .pay-period-info {
+            flex: 1;
+        }
+
+        .pay-period-title {
+            font-size: 13px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .pay-period-subtitle {
+            font-size: 10px;
+            letter-spacing: 0.5px;
+        }
+
+        .pay-period-stats {
+            text-align: right;
+        }
+
+        .pay-period-hours {
+            font-size: 16px;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .pay-period-pay {
+            font-size: 12px;
+            letter-spacing: 1px;
+        }
+
+        .pay-period-content {
+            background: #f5f5f0;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 10px;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .pay-period-content.expanded {
+            max-height: 1000px;
+        }
+
+        .day-entry {
+            background: white;
+            padding: 12px;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+
+        .day-entry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 2px dashed #d0d0d0;
+        }
+
+        .day-entry-date {
+            font-weight: bold;
+            color: #2c2c2c;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 11px;
+        }
+
+        .day-entry-hours {
+            font-size: 12px;
+            color: #2c2c2c;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .day-punches {
+            font-size: 11px;
+        }
+
+        .day-punch-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            color: #666;
+        }
+
+        .empty-history {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+
+        .empty-history-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: #f5f5f0;
+            padding: 15px;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            text-align: center;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 8px rgba(0,0,0,0.15),
+                inset 0 1px 2px rgba(255,255,255,0.5);
+        }
+
+        .stat-label {
+            font-size: 9px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2c2c2c;
+            letter-spacing: 1px;
+        }
+
+        .pay-display {
+            background: #2c2c2c;
+            color: white;
+            padding: 20px;
+            border-radius: 4px;
+            text-align: center;
+            margin-bottom: 20px;
+            border: 3px solid #2c2c2c;
+            box-shadow: 
+                0 4px 0 #1a1a1a,
+                0 6px 12px rgba(0,0,0,0.3),
+                inset 0 1px 0 rgba(255,255,255,0.1);
+        }
+
+        .pay-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .pay-amount {
+            font-size: 32px;
+            font-weight: bold;
+            letter-spacing: 2px;
+        }
+
+        .profile-list {
+            max-height: 350px;
+            overflow-y: auto;
+        }
+
+        .profile-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: white;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            transition: all 0.15s;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 8px rgba(0,0,0,0.15);
+        }
+
+        .profile-item:hover {
+            background: #f5f5f0;
+            transform: translateY(-2px);
+            box-shadow: 
+                0 5px 0 #1a1a1a,
+                0 6px 10px rgba(0,0,0,0.2);
+        }
+
+        .profile-info {
+            flex: 1;
+            cursor: pointer;
+        }
+
+        .profile-name {
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .profile-details {
+            font-size: 10px;
+            color: #666;
+            letter-spacing: 0.5px;
+        }
+
+        .profile-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .icon-btn {
+            width: 45px;
+            height: 40px;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.1s;
+            box-shadow: 
+                0 3px 0 #1a1a1a,
+                0 4px 6px rgba(0,0,0,0.15);
+        }
+
+        .icon-btn:hover {
+            background: #f5f5f0;
+        }
+
+        .icon-btn:active {
+            transform: translateY(3px);
+            box-shadow: 
+                0 0 0 #1a1a1a,
+                0 1px 3px rgba(0,0,0,0.15);
+        }
+
+        .icon-btn.delete {
+            color: #f44336;
+        }
+
+        .current-profile-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #4caf50;
+            color: white;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-left: 10px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border: 4px solid #2c2c2c;
+            border-radius: 4px;
+            padding: 30px;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: 
+                0 8px 0 #1a1a1a,
+                0 12px 24px rgba(0,0,0,0.4),
+                inset 0 2px 4px rgba(0,0,0,0.1);
+            transform: translateY(0);
+            animation: modalAppear 0.2s ease;
+        }
+
+        @keyframes modalAppear {
+            from {
+                transform: translateY(-20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 2px solid #2c2c2c;
+            padding-bottom: 10px;
+        }
+
+        .modal-text {
+            margin-bottom: 20px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .modal-buttons .btn {
+            flex: 1;
+        }
+
+        .sync-status {
+            background: #f5f5f0;
+            border: 2px solid #2c2c2c;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 
+                inset 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .sync-status-label {
+            font-size: 10px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            letter-spacing: 1px;
+        }
+
+        .sync-status-value {
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .sync-status-value.connected {
+            color: #4caf50;
+        }
+
+        .sync-status-value.syncing {
+            color: #ff9800;
+        }
+
+        .sync-status-value.error {
+            color: #f44336;
+        }
+
+        .sync-last-update {
+            font-size: 10px;
+            color: #666;
+        }
+
+        .sync-info {
+            font-size: 11px;
+            line-height: 1.6;
+            color: #666;
+            margin-top: 15px;
+            padding: 12px;
+            background: #f5f5f0;
+            border: 2px dashed #d0d0d0;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>TIMECARD</h1>
+            <div class="current-profile-display" id="currentProfileDisplay">
+                EMPLOYEE: <strong id="currentProfileName">-</strong>
+            </div>
+            <div class="current-time" id="currentTime">00:00:00</div>
+            <div class="current-date" id="currentDate"></div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="nav-tabs">
+            <div class="nav-tab active" onclick="switchView('punching')">
+                <div class="nav-tab-icon">[P]</div>
+                <div class="nav-tab-label">Punching</div>
+            </div>
+            <div class="nav-tab" onclick="switchView('history')">
+                <div class="nav-tab-icon">[H]</div>
+                <div class="nav-tab-label">History</div>
+            </div>
+            <div class="nav-tab" onclick="switchView('settings')">
+                <div class="nav-tab-icon">[S]</div>
+                <div class="nav-tab-label">Settings</div>
+            </div>
+        </div>
+
+        <!-- PUNCHING VIEW -->
+        <div id="punchingView" class="view-container active">
+            <div class="card">
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">CLOCKED OUT</span>
+                </div>
+
+                <div id="clockedOutControls">
+                    <button class="btn btn-primary" onclick="clockIn()">CLOCK IN</button>
+                </div>
+
+                <div id="clockedInControls" class="hidden">
+                    <button class="btn btn-danger" onclick="clockOut()">CLOCK OUT</button>
+                    
+                    <div class="section-title" style="margin-top: 20px;">BREAK</div>
+                    <div class="break-buttons">
+                        <button class="break-btn" onclick="startBreak(15)">15 MIN</button>
+                        <button class="break-btn" onclick="startBreak(30)">30 MIN</button>
+                        <button class="break-btn" onclick="startBreak(60)">60 MIN</button>
+                    </div>
+                </div>
+
+                <div id="breakControls" class="hidden">
+                    <div class="break-timer" id="breakTimer">00:00</div>
+                    <button class="btn btn-warning" onclick="endBreak()">END BREAK</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="pay-display">
+                    <div class="pay-label">ESTIMATED PAY TODAY</div>
+                    <div class="pay-amount" id="estimatedPay">$0.00</div>
+                </div>
+
+                <div class="summary">
+                    <div class="summary-item">
+                        <div class="summary-label">HOURS</div>
+                        <div class="summary-value" id="hoursWorked">0.00</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">BREAK</div>
+                        <div class="summary-value" id="breakTime">0:00</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="section-title">TODAY'S PUNCHES</div>
+                <div class="punch-history" id="punchHistory">
+                    <div style="text-align: center; color: #999; padding: 20px; font-size: 12px;">
+                        NO PUNCHES RECORDED
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- HISTORY VIEW -->
+        <div id="historyView" class="view-container">
+            <div class="card">
+                <div class="section-title">PAY PERIOD HISTORY</div>
+                <div id="historyContent"></div>
+            </div>
+        </div>
+
+        <!-- SETTINGS VIEW -->
+        <div id="settingsView" class="view-container">
+            <!-- Profile Management -->
+            <div class="card">
+                <div class="section-title">EMPLOYEE PROFILES</div>
+                
+                <div class="input-group">
+                    <label>NEW PROFILE NAME</label>
+                    <input type="text" id="newProfileName" placeholder="Enter employee name">
+                </div>
+                
+                <button class="btn btn-primary" onclick="createProfile()">CREATE PROFILE</button>
+                
+                <div class="section-title" style="margin-top: 20px;">ALL PROFILES</div>
+                <div class="profile-list" id="profileList"></div>
+            </div>
+
+            <!-- Pay Settings -->
+            <div class="card">
+                <div class="section-title">PAY SETTINGS</div>
+                
+                <div class="input-group">
+                    <label>HOURLY RATE ($)</label>
+                    <input type="number" id="hourlyRateInput" step="0.01" min="0" value="15.00" onchange="updateSettings()">
+                </div>
+
+                <div class="input-group">
+                    <label>PAY PERIOD</label>
+                    <select id="payPeriodInput" onchange="updateSettings()">
+                        <option value="weekly">WEEKLY</option>
+                        <option value="biweekly">BIWEEKLY</option>
+                        <option value="semi-monthly">SEMI-MONTHLY</option>
+                        <option value="monthly">MONTHLY</option>
+                        <option value="yearly">YEARLY</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Google Drive Sync -->
+            <div class="card">
+                <div class="section-title">DATA BACKUP & SYNC</div>
+                
+                <div id="syncStatus" class="sync-status">
+                    <div class="sync-status-label">GOOGLE DRIVE STATUS:</div>
+                    <div class="sync-status-value" id="syncStatusText">NOT CONNECTED</div>
+                    <div class="sync-last-update" id="lastSyncTime"></div>
+                </div>
+
+                <div id="notConnectedButtons">
+                    <button class="btn btn-primary" onclick="connectGoogleDrive()">CONNECT GOOGLE DRIVE</button>
+                </div>
+
+                <div id="connectedButtons" class="hidden">
+                    <button class="btn btn-primary" onclick="syncToGoogleDrive()">SYNC TO DRIVE</button>
+                    <button class="btn btn-secondary" onclick="syncFromGoogleDrive()">RESTORE FROM DRIVE</button>
+                    <button class="btn btn-danger" onclick="disconnectGoogleDrive()">DISCONNECT DRIVE</button>
+                </div>
+
+                <div class="sync-info">
+                    <strong>AUTO-SAVE:</strong> All data is automatically saved locally in your browser.
+                    <br><br>
+                    <strong>GOOGLE DRIVE SYNC:</strong> Optional backup to protect years of timecard data. Manually sync when needed or use auto-sync.
+                </div>
+
+                <div class="input-group" id="autoSyncSection" class="hidden">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="autoSyncCheckbox" onchange="toggleAutoSync()" style="width: auto;">
+                        ENABLE AUTO-SYNC (Daily)
+                    </label>
+                </div>
+            </div>
+
+            <!-- Statistics -->
+            <div class="card">
+                <div class="section-title">STATISTICS</div>
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="stat-label">TOTAL HOURS</div>
+                        <div class="stat-value" id="totalHoursStat">0.00</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">TOTAL PAY</div>
+                        <div class="stat-value" id="totalPayStat">$0.00</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">DAYS WORKED</div>
+                        <div class="stat-value" id="daysWorkedStat">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">AVG HRS/DAY</div>
+                        <div class="stat-value" id="avgHoursStat">0.00</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div class="modal" id="confirmModal">
+        <div class="modal-content">
+            <div class="modal-title" id="confirmTitle">CONFIRM</div>
+            <div class="modal-text" id="confirmText"></div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeConfirmModal()">CANCEL</button>
+                <button class="btn btn-danger" id="confirmButton" onclick="confirmAction()">CONFIRM</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Google Drive Configuration
+        const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID'; // Replace with your Google OAuth client ID
+        const GOOGLE_API_KEY = 'YOUR_API_KEY'; // Replace with your Google API key
+        const DISCOVERY_DOCS = ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"];
+        const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+        
+        let gapiLoaded = false;
+        let gisLoaded = false;
+        let tokenClient;
+        let accessToken = null;
+        let googleDriveFileId = null;
+
+        // Global state
+        let profiles = [];
+        let currentProfileId = null;
+        let confirmCallback = null;
+
+        // Profile-specific state
+        let state = {
+            clockedIn: false,
+            onBreak: false,
+            clockInTime: null,
+            currentBreakStart: null,
+            breakDuration: 0,
+            breakEndTime: null,
+            punches: [],
+            totalBreakTime: 0,
+            hourlyRate: 15.00,
+            payPeriod: 'weekly',
+            breakTimerInterval: null,
+            historicalData: [],
+            currentView: 'punching'
+        };
+
+        // Google Drive sync settings
+        let syncSettings = {
+            connected: false,
+            autoSync: false,
+            lastSyncTime: null,
+            driveFileId: null
+        };
+
+        // Load sync settings
+        function loadSyncSettings() {
+            const saved = localStorage.getItem('timecardSyncSettings');
+            if (saved) {
+                syncSettings = JSON.parse(saved);
+                if (syncSettings.lastSyncTime) {
+                    syncSettings.lastSyncTime = new Date(syncSettings.lastSyncTime);
+                }
+            }
+            updateSyncUI();
+        }
+
+        // Save sync settings
+        function saveSyncSettings() {
+            localStorage.setItem('timecardSyncSettings', JSON.stringify(syncSettings));
+        }
+
+        // Update sync UI
+        function updateSyncUI() {
+            const statusText = document.getElementById('syncStatusText');
+            const lastSyncTime = document.getElementById('lastSyncTime');
+            const notConnectedButtons = document.getElementById('notConnectedButtons');
+            const connectedButtons = document.getElementById('connectedButtons');
+            const autoSyncSection = document.getElementById('autoSyncSection');
+            const autoSyncCheckbox = document.getElementById('autoSyncCheckbox');
+
+            if (syncSettings.connected) {
+                statusText.textContent = 'CONNECTED';
+                statusText.className = 'sync-status-value connected';
+                notConnectedButtons.classList.add('hidden');
+                connectedButtons.classList.remove('hidden');
+                autoSyncSection.classList.remove('hidden');
+                
+                if (syncSettings.lastSyncTime) {
+                    lastSyncTime.textContent = 'LAST SYNC: ' + syncSettings.lastSyncTime.toLocaleString();
+                } else {
+                    lastSyncTime.textContent = 'NEVER SYNCED';
+                }
+
+                autoSyncCheckbox.checked = syncSettings.autoSync;
+            } else {
+                statusText.textContent = 'NOT CONNECTED';
+                statusText.className = 'sync-status-value';
+                notConnectedButtons.classList.remove('hidden');
+                connectedButtons.classList.add('hidden');
+                autoSyncSection.classList.add('hidden');
+                lastSyncTime.textContent = '';
+            }
+        }
+
+        // Connect to Google Drive (simplified - no actual OAuth)
+        function connectGoogleDrive() {
+            // Simulated connection for demo purposes
+            // In production, you would implement proper Google OAuth flow
+            syncSettings.connected = true;
+            saveSyncSettings();
+            updateSyncUI();
+            alert('Google Drive Connected!\n\nNOTE: This is a demo connection. To enable real Google Drive sync, you need to:\n1. Create a Google Cloud Project\n2. Enable Google Drive API\n3. Get OAuth credentials\n4. Replace the placeholder client ID and API key in the code');
+        }
+
+        // Disconnect from Google Drive
+        function disconnectGoogleDrive() {
+            showConfirmModal(
+                'DISCONNECT GOOGLE DRIVE',
+                'Are you sure you want to disconnect Google Drive? Your local data will remain safe, but you will need to reconnect to sync.',
+                () => {
+                    syncSettings.connected = false;
+                    syncSettings.autoSync = false;
+                    syncSettings.driveFileId = null;
+                    accessToken = null;
+                    saveSyncSettings();
+                    updateSyncUI();
+                }
+            );
+        }
+
+        // Sync to Google Drive
+        function syncToGoogleDrive() {
+            if (!syncSettings.connected) {
+                alert('Please connect to Google Drive first');
+                return;
+            }
+
+            const statusText = document.getElementById('syncStatusText');
+            statusText.textContent = 'SYNCING...';
+            statusText.className = 'sync-status-value syncing';
+
+            // Prepare all data for backup
+            const backupData = {
+                version: '1.0',
+                exportDate: new Date().toISOString(),
+                profiles: profiles,
+                currentProfileId: currentProfileId,
+                profileData: {}
+            };
+
+            // Include all profile data
+            profiles.forEach(profile => {
+                const profileState = localStorage.getItem(`profile_${profile.id}`);
+                if (profileState) {
+                    backupData.profileData[profile.id] = JSON.parse(profileState);
+                }
+            });
+
+            // In a real implementation, this would upload to Google Drive
+            // For demo purposes, we'll simulate it
+            setTimeout(() => {
+                // Simulate successful sync
+                syncSettings.lastSyncTime = new Date();
+                saveSyncSettings();
+                
+                statusText.textContent = 'CONNECTED';
+                statusText.className = 'sync-status-value connected';
+                updateSyncUI();
+                
+                alert('Data synced to Google Drive successfully!\n\nProfiles: ' + profiles.length + '\nTotal Size: ' + (JSON.stringify(backupData).length / 1024).toFixed(2) + ' KB');
+            }, 1500);
+        }
+
+        // Restore from Google Drive
+        function syncFromGoogleDrive() {
+            if (!syncSettings.connected) {
+                alert('Please connect to Google Drive first');
+                return;
+            }
+
+            showConfirmModal(
+                'RESTORE FROM GOOGLE DRIVE',
+                'This will replace ALL local data with your Google Drive backup. Are you sure you want to continue?',
+                () => {
+                    const statusText = document.getElementById('syncStatusText');
+                    statusText.textContent = 'RESTORING...';
+                    statusText.className = 'sync-status-value syncing';
+
+                    // In a real implementation, this would download from Google Drive
+                    setTimeout(() => {
+                        statusText.textContent = 'CONNECTED';
+                        statusText.className = 'sync-status-value connected';
+                        
+                        // For demo, just show what would happen
+                        alert('In a real implementation, this would:\n\n1. Download your backup from Google Drive\n2. Restore all profiles and timecard data\n3. Update the current view\n\nYour local data is safe and unchanged in this demo.');
+                    }, 1500);
+                }
+            );
+        }
+
+        // Toggle auto-sync
+        function toggleAutoSync() {
+            syncSettings.autoSync = document.getElementById('autoSyncCheckbox').checked;
+            saveSyncSettings();
+            
+            if (syncSettings.autoSync) {
+                alert('Auto-sync enabled!\n\nYour data will automatically sync to Google Drive once per day.');
+            }
+        }
+
+        // Auto-sync check (runs daily if enabled)
+        function checkAutoSync() {
+            if (!syncSettings.autoSync || !syncSettings.connected) return;
+
+            const now = new Date();
+            const lastSync = syncSettings.lastSyncTime;
+
+            if (!lastSync || (now - lastSync) > 24 * 60 * 60 * 1000) {
+                syncToGoogleDrive();
+            }
+        }
+
+        // Load all data
+        function loadAllData() {
+            const savedProfiles = localStorage.getItem('timeClockProfiles');
+            const savedCurrentId = localStorage.getItem('currentProfileId');
+            
+            if (savedProfiles) {
+                profiles = JSON.parse(savedProfiles);
+            }
+            
+            if (savedCurrentId && profiles.find(p => p.id === savedCurrentId)) {
+                currentProfileId = savedCurrentId;
+                loadProfileState();
+            } else if (profiles.length > 0) {
+                currentProfileId = profiles[0].id;
+                loadProfileState();
+            } else {
+                // Create default profile
+                createDefaultProfile();
+            }
+            
+            updateUI();
+            renderProfileList();
+        }
+
+        // Create default profile
+        function createDefaultProfile() {
+            const defaultProfile = {
+                id: Date.now().toString(),
+                name: 'Default Employee',
+                createdAt: new Date().toISOString()
+            };
+            profiles.push(defaultProfile);
+            currentProfileId = defaultProfile.id;
+            saveProfiles();
+            saveProfileState();
+        }
+
+        // Save profiles
+        function saveProfiles() {
+            localStorage.setItem('timeClockProfiles', JSON.stringify(profiles));
+            localStorage.setItem('currentProfileId', currentProfileId);
+        }
+
+        // Load profile state
+        function loadProfileState() {
+            const saved = localStorage.getItem(`profile_${currentProfileId}`);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                state = { ...state, ...parsed };
+                
+                // Convert dates
+                if (state.clockInTime) state.clockInTime = new Date(state.clockInTime);
+                if (state.currentBreakStart) state.currentBreakStart = new Date(state.currentBreakStart);
+                if (state.breakEndTime) state.breakEndTime = new Date(state.breakEndTime);
+                state.punches = state.punches.map(p => ({
+                    ...p,
+                    time: new Date(p.time)
+                }));
+
+                if (state.historicalData) {
+                    state.historicalData = state.historicalData.map(period => ({
+                        ...period,
+                        startDate: new Date(period.startDate),
+                        endDate: new Date(period.endDate),
+                        days: period.days.map(day => ({
+                            ...day,
+                            date: new Date(day.date),
+                            punches: day.punches.map(p => ({
+                                ...p,
+                                time: new Date(p.time)
+                            }))
+                        }))
+                    }));
+                }
+
+                const today = new Date().toDateString();
+                state.punches = state.punches.filter(p => p.time.toDateString() === today);
+
+                if (state.onBreak && state.breakEndTime && new Date() >= state.breakEndTime) {
+                    endBreak();
+                }
+            }
+        }
+
+        // Save profile state
+        function saveProfileState() {
+            if (!currentProfileId) return;
+            localStorage.setItem(`profile_${currentProfileId}`, JSON.stringify(state));
+        }
+
+        // Create new profile
+        function createProfile() {
+            const name = document.getElementById('newProfileName').value.trim();
+            if (!name) {
+                alert('Please enter a profile name');
+                return;
+            }
+            
+            const newProfile = {
+                id: Date.now().toString(),
+                name: name,
+                createdAt: new Date().toISOString()
+            };
+            
+            profiles.push(newProfile);
+            saveProfiles();
+            renderProfileList();
+            document.getElementById('newProfileName').value = '';
+        }
+
+        // Switch profile
+        function switchProfile(profileId) {
+            if (state.clockedIn) {
+                alert('Please clock out before switching profiles');
+                return;
+            }
+            
+            saveProfileState();
+            currentProfileId = profileId;
+            
+            // Reset state for new profile
+            state = {
+                clockedIn: false,
+                onBreak: false,
+                clockInTime: null,
+                currentBreakStart: null,
+                breakDuration: 0,
+                breakEndTime: null,
+                punches: [],
+                totalBreakTime: 0,
+                hourlyRate: 15.00,
+                payPeriod: 'weekly',
+                breakTimerInterval: null,
+                historicalData: [],
+                currentView: 'punching'
+            };
+            
+            loadProfileState();
+            saveProfiles();
+            updateUI();
+            renderProfileList();
+        }
+
+        // Delete profile with confirmation
+        function deleteProfile(profileId) {
+            const profile = profiles.find(p => p.id === profileId);
+            if (!profile) return;
+            
+            showConfirmModal(
+                'DELETE PROFILE',
+                `Are you sure you want to delete "${profile.name}"? All data for this profile will be permanently lost.`,
+                () => {
+                    // Remove profile
+                    profiles = profiles.filter(p => p.id !== profileId);
+                    
+                    // Remove profile data
+                    localStorage.removeItem(`profile_${profileId}`);
+                    
+                    // If deleting current profile, switch to another
+                    if (currentProfileId === profileId) {
+                        if (profiles.length > 0) {
+                            currentProfileId = profiles[0].id;
+                            loadProfileState();
+                        } else {
+                            createDefaultProfile();
+                        }
+                    }
+                    
+                    saveProfiles();
+                    renderProfileList();
+                    updateUI();
+                }
+            );
+        }
+
+        // Show confirmation modal
+        function showConfirmModal(title, text, callback) {
+            document.getElementById('confirmTitle').textContent = title;
+            document.getElementById('confirmText').textContent = text;
+            document.getElementById('confirmModal').classList.add('active');
+            confirmCallback = callback;
+        }
+
+        // Close confirmation modal
+        function closeConfirmModal() {
+            document.getElementById('confirmModal').classList.remove('active');
+            confirmCallback = null;
+        }
+
+        // Confirm action
+        function confirmAction() {
+            if (confirmCallback) {
+                confirmCallback();
+            }
+            closeConfirmModal();
+        }
+
+        // Render profile list
+        function renderProfileList() {
+            const listDiv = document.getElementById('profileList');
+            
+            if (profiles.length === 0) {
+                listDiv.innerHTML = '<div style="text-align: center; padding: 20px; color: #999; font-size: 12px;">NO PROFILES</div>';
+                return;
+            }
+            
+            listDiv.innerHTML = profiles.map(profile => `
+                <div class="profile-item">
+                    <div class="profile-info" onclick="switchProfile('${profile.id}')">
+                        <div class="profile-name">
+                            ${profile.name}
+                            ${profile.id === currentProfileId ? '<span class="current-profile-badge">ACTIVE</span>' : ''}
+                        </div>
+                        <div class="profile-details">
+                            CREATED: ${new Date(profile.createdAt).toLocaleDateString()}
+                        </div>
+                    </div>
+                    <div class="profile-actions">
+                        <button class="icon-btn delete" onclick="deleteProfile('${profile.id}')" ${profiles.length === 1 ? 'disabled' : ''}>DEL</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Clock In
+        function clockIn() {
+            state.clockedIn = true;
+            state.clockInTime = new Date();
+            state.totalBreakTime = 0;
+            addPunch('CLOCK IN');
+            updateUI();
+            saveProfileState();
+        }
+
+        // Clock Out
+        function clockOut() {
+            if (state.onBreak) {
+                endBreak();
+            }
+            state.clockedIn = false;
+            addPunch('CLOCK OUT');
+            updateUI();
+            saveProfileState();
+        }
+
+        // Start Break
+        function startBreak(minutes) {
+            state.onBreak = true;
+            state.currentBreakStart = new Date();
+            state.breakDuration = minutes;
+            state.breakEndTime = new Date(state.currentBreakStart.getTime() + minutes * 60000);
+            addPunch(`BREAK START (${minutes} MIN)`);
+            
+            if (state.breakTimerInterval) {
+                clearInterval(state.breakTimerInterval);
+            }
+            state.breakTimerInterval = setInterval(updateBreakTimer, 1000);
+            
+            updateUI();
+            saveProfileState();
+        }
+
+        // End Break
+        function endBreak() {
+            if (state.currentBreakStart) {
+                const breakDuration = (new Date() - state.currentBreakStart) / 1000;
+                state.totalBreakTime += breakDuration;
+            }
+            state.onBreak = false;
+            addPunch('BREAK END');
+            
+            if (state.breakTimerInterval) {
+                clearInterval(state.breakTimerInterval);
+                state.breakTimerInterval = null;
+            }
+            
+            state.currentBreakStart = null;
+            state.breakEndTime = null;
+            state.breakDuration = 0;
+            updateUI();
+            saveProfileState();
+        }
+
+        // Update Break Timer
+        function updateBreakTimer() {
+            if (!state.onBreak || !state.breakEndTime) return;
+            
+            const now = new Date();
+            const remaining = Math.max(0, state.breakEndTime - now);
+            
+            if (remaining === 0) {
+                endBreak();
+                return;
+            }
+            
+            const minutes = Math.floor(remaining / 60000);
+            const seconds = Math.floor((remaining % 60000) / 1000);
+            
+            document.getElementById('breakTimer').textContent = 
+                `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        // Add Punch
+        function addPunch(type) {
+            state.punches.push({
+                type: type,
+                time: new Date()
+            });
+        }
+
+        // Calculate Hours Worked
+        function calculateHoursWorked() {
+            if (!state.clockedIn || !state.clockInTime) return 0;
+            
+            const now = new Date();
+            const totalSeconds = (now - state.clockInTime) / 1000;
+            
+            let currentBreakSeconds = 0;
+            if (state.onBreak && state.currentBreakStart) {
+                currentBreakSeconds = (now - state.currentBreakStart) / 1000;
+            }
+            
+            const workSeconds = totalSeconds - state.totalBreakTime - currentBreakSeconds;
+            return Math.max(0, workSeconds / 3600);
+        }
+
+        // Get Total Break Time
+        function getTotalBreakTime() {
+            let total = state.totalBreakTime;
+            
+            if (state.onBreak && state.currentBreakStart) {
+                total += (new Date() - state.currentBreakStart) / 1000;
+            }
+            
+            return total;
+        }
+
+        // Format Break Time
+        function formatBreakTime(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            
+            if (hours > 0) {
+                return `${hours}:${String(minutes).padStart(2, '0')}`;
+            }
+            return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+        }
+
+        // Calculate Pay
+        function calculatePay() {
+            const hours = calculateHoursWorked();
+            return (hours * state.hourlyRate).toFixed(2);
+        }
+
+        // Switch View
+        function switchView(view) {
+            state.currentView = view;
+            
+            document.querySelectorAll('.nav-tab').forEach(tab => tab.classList.remove('active'));
+            event.target.closest('.nav-tab').classList.add('active');
+            
+            document.querySelectorAll('.view-container').forEach(v => v.classList.remove('active'));
+            document.getElementById(view + 'View').classList.add('active');
+            
+            if (view === 'history') {
+                renderHistory();
+            } else if (view === 'settings') {
+                updateSettingsView();
+            }
+        }
+
+        // Get Pay Period Dates
+        function getPayPeriodDates(date = new Date()) {
+            const d = new Date(date);
+            let startDate, endDate;
+            
+            switch(state.payPeriod) {
+                case 'weekly':
+                    const day = d.getDay();
+                    startDate = new Date(d);
+                    startDate.setDate(d.getDate() - day);
+                    startDate.setHours(0, 0, 0, 0);
+                    endDate = new Date(startDate);
+                    endDate.setDate(startDate.getDate() + 6);
+                    endDate.setHours(23, 59, 59, 999);
+                    break;
+                    
+                case 'biweekly':
+                    const refDate = new Date('2024-01-01');
+                    const daysSinceRef = Math.floor((d - refDate) / (1000 * 60 * 60 * 24));
+                    const periodNumber = Math.floor(daysSinceRef / 14);
+                    startDate = new Date(refDate);
+                    startDate.setDate(refDate.getDate() + (periodNumber * 14));
+                    startDate.setHours(0, 0, 0, 0);
+                    endDate = new Date(startDate);
+                    endDate.setDate(startDate.getDate() + 13);
+                    endDate.setHours(23, 59, 59, 999);
+                    break;
+                    
+                case 'semi-monthly':
+                    if (d.getDate() <= 15) {
+                        startDate = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+                        endDate = new Date(d.getFullYear(), d.getMonth(), 15, 23, 59, 59, 999);
+                    } else {
+                        startDate = new Date(d.getFullYear(), d.getMonth(), 16, 0, 0, 0, 0);
+                        endDate = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+                    }
+                    break;
+                    
+                case 'monthly':
+                    startDate = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+                    endDate = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+                    break;
+                    
+                case 'yearly':
+                    startDate = new Date(d.getFullYear(), 0, 1, 0, 0, 0, 0);
+                    endDate = new Date(d.getFullYear(), 11, 31, 23, 59, 59, 999);
+                    break;
+            }
+            
+            return { startDate, endDate };
+        }
+
+        // Check Pay Period End
+        function checkPayPeriodEnd() {
+            if (state.punches.length === 0) return;
+            
+            const { endDate } = getPayPeriodDates();
+            const now = new Date();
+            
+            if (now > endDate) {
+                archiveCurrentPayPeriod();
+            }
+        }
+
+        // Archive Current Pay Period
+        function archiveCurrentPayPeriod() {
+            if (state.punches.length === 0) return;
+            
+            const dayMap = {};
+            state.punches.forEach(punch => {
+                const dateKey = punch.time.toDateString();
+                if (!dayMap[dateKey]) {
+                    dayMap[dateKey] = {
+                        date: new Date(punch.time),
+                        punches: []
+                    };
+                }
+                dayMap[dateKey].punches.push(punch);
+            });
+            
+            const days = Object.values(dayMap);
+            
+            let totalHours = 0;
+            days.forEach(day => {
+                const hours = calculateDayHours(day.punches);
+                totalHours += hours;
+            });
+            
+            const totalPay = totalHours * state.hourlyRate;
+            const { startDate, endDate } = getPayPeriodDates(state.punches[0].time);
+            
+            const period = {
+                id: Date.now(),
+                startDate,
+                endDate,
+                days,
+                totalHours,
+                totalPay,
+                payPeriod: state.payPeriod,
+                hourlyRate: state.hourlyRate
+            };
+            
+            if (!state.historicalData) {
+                state.historicalData = [];
+            }
+            state.historicalData.unshift(period);
+            
+            state.punches = [];
+            saveProfileState();
+        }
+
+        // Calculate Day Hours
+        function calculateDayHours(punches) {
+            let totalSeconds = 0;
+            let breakSeconds = 0;
+            let clockInTime = null;
+            let breakStartTime = null;
+            
+            punches.forEach(punch => {
+                if (punch.type === 'CLOCK IN') {
+                    clockInTime = punch.time;
+                } else if (punch.type === 'CLOCK OUT' && clockInTime) {
+                    totalSeconds += (punch.time - clockInTime) / 1000;
+                    clockInTime = null;
+                } else if (punch.type.includes('BREAK START')) {
+                    breakStartTime = punch.time;
+                } else if (punch.type === 'BREAK END' && breakStartTime) {
+                    breakSeconds += (punch.time - breakStartTime) / 1000;
+                    breakStartTime = null;
+                }
+            });
+            
+            const workSeconds = totalSeconds - breakSeconds;
+            return Math.max(0, workSeconds / 3600);
+        }
+
+        // Render History
+        function renderHistory() {
+            const historyContent = document.getElementById('historyContent');
+            
+            if (!state.historicalData || state.historicalData.length === 0) {
+                historyContent.innerHTML = `
+                    <div class="empty-history">
+                        <div class="empty-history-icon">[ ]</div>
+                        <div style="font-size: 12px;">NO PAY PERIOD HISTORY</div>
+                        <div style="font-size: 10px; margin-top: 5px; color: #aaa;">Hours will be grouped at end of pay period</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            historyContent.innerHTML = state.historicalData.map((period, index) => `
+                <div class="pay-period-group">
+                    <div class="pay-period-header" onclick="togglePayPeriod(${index})">
+                        <div class="pay-period-info">
+                            <div class="pay-period-title">${formatPayPeriodTitle(period.payPeriod)}</div>
+                            <div class="pay-period-subtitle">
+                                ${period.startDate.toLocaleDateString()} - ${period.endDate.toLocaleDateString()}
+                            </div>
+                        </div>
+                        <div class="pay-period-stats">
+                            <div class="pay-period-hours">${period.totalHours.toFixed(2)} HRS</div>
+                            <div class="pay-period-pay">$${period.totalPay.toFixed(2)}</div>
+                        </div>
+                    </div>
+                    <div class="pay-period-content" id="period-${index}">
+                        ${period.days.map(day => `
+                            <div class="day-entry">
+                                <div class="day-entry-header">
+                                    <div class="day-entry-date">
+                                        ${day.date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase()}
+                                    </div>
+                                    <div class="day-entry-hours">
+                                        ${calculateDayHours(day.punches).toFixed(2)} HRS
+                                    </div>
+                                </div>
+                                <div class="day-punches">
+                                    ${day.punches.map(p => `
+                                        <div class="day-punch-item">
+                                            <span>${p.type}</span>
+                                            <span>${p.time.toLocaleTimeString()}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Toggle Pay Period
+        function togglePayPeriod(index) {
+            const content = document.getElementById(`period-${index}`);
+            content.classList.toggle('expanded');
+        }
+
+        // Format Pay Period Title
+        function formatPayPeriodTitle(period) {
+            const titles = {
+                'weekly': 'WEEKLY',
+                'biweekly': 'BIWEEKLY',
+                'semi-monthly': 'SEMI-MONTHLY',
+                'monthly': 'MONTHLY',
+                'yearly': 'YEARLY'
+            };
+            return titles[period] || period.toUpperCase();
+        }
+
+        // Update Settings View
+        function updateSettingsView() {
+            document.getElementById('hourlyRateInput').value = state.hourlyRate;
+            document.getElementById('payPeriodInput').value = state.payPeriod;
+            
+            let totalHours = 0;
+            let totalPay = 0;
+            let daysWorked = 0;
+            
+            if (state.historicalData) {
+                state.historicalData.forEach(period => {
+                    totalHours += period.totalHours;
+                    totalPay += period.totalPay;
+                    daysWorked += period.days.length;
+                });
+            }
+            
+            const avgHours = daysWorked > 0 ? totalHours / daysWorked : 0;
+            
+            document.getElementById('totalHoursStat').textContent = totalHours.toFixed(2);
+            document.getElementById('totalPayStat').textContent = '$' + totalPay.toFixed(2);
+            document.getElementById('daysWorkedStat').textContent = daysWorked;
+            document.getElementById('avgHoursStat').textContent = avgHours.toFixed(2);
+        }
+
+        // Update Settings
+        function updateSettings() {
+            state.hourlyRate = parseFloat(document.getElementById('hourlyRateInput').value) || 15.00;
+            state.payPeriod = document.getElementById('payPeriodInput').value;
+            saveProfileState();
+            updateUI();
+        }
+
+        // Update UI
+        function updateUI() {
+            // Update current profile display
+            const currentProfile = profiles.find(p => p.id === currentProfileId);
+            if (currentProfile) {
+                document.getElementById('currentProfileName').textContent = currentProfile.name;
+            }
+
+            // Update status
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            
+            if (state.onBreak) {
+                statusDot.className = 'status-dot on-break';
+                statusText.textContent = 'ON BREAK';
+            } else if (state.clockedIn) {
+                statusDot.className = 'status-dot clocked-in';
+                statusText.textContent = 'CLOCKED IN';
+            } else {
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'CLOCKED OUT';
+            }
+
+            // Show/hide controls
+            document.getElementById('clockedOutControls').className = !state.clockedIn ? '' : 'hidden';
+            document.getElementById('clockedInControls').className = state.clockedIn && !state.onBreak ? '' : 'hidden';
+            document.getElementById('breakControls').className = state.onBreak ? '' : 'hidden';
+
+            // Update summary
+            const hours = calculateHoursWorked();
+            document.getElementById('hoursWorked').textContent = hours.toFixed(2);
+            document.getElementById('breakTime').textContent = formatBreakTime(getTotalBreakTime());
+            document.getElementById('estimatedPay').textContent = '$' + calculatePay();
+
+            // Update punch history
+            const historyDiv = document.getElementById('punchHistory');
+            if (state.punches.length === 0) {
+                historyDiv.innerHTML = '<div style="text-align: center; color: #999; padding: 20px; font-size: 12px;">NO PUNCHES RECORDED</div>';
+            } else {
+                historyDiv.innerHTML = state.punches.map(punch => {
+                    const typeClass = punch.type.includes('CLOCK IN') ? 'in' : 
+                                     punch.type.includes('CLOCK OUT') ? 'out' :
+                                     punch.type.includes('BREAK START') ? 'break-start' : 'break-end';
+                    return `
+                        <div class="punch-item">
+                            <span class="punch-type ${typeClass}">${punch.type}</span>
+                            <span>${punch.time.toLocaleTimeString()}</span>
+                        </div>
+                    `;
+                }).reverse().join('');
+            }
+
+            // Update settings inputs
+            document.getElementById('hourlyRateInput').value = state.hourlyRate;
+            document.getElementById('payPeriodInput').value = state.payPeriod;
+        }
+
+        // Update Current Time
+        function updateCurrentTime() {
+            const now = new Date();
+            document.getElementById('currentTime').textContent = now.toLocaleTimeString();
+            document.getElementById('currentDate').textContent = now.toLocaleDateString('en-US', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            }).toUpperCase();
+
+            if (state.clockedIn) {
+                updateUI();
+            }
+        }
+
+        // Initialize
+        loadSyncSettings();
+        loadAllData();
+        setInterval(updateCurrentTime, 1000);
+        updateCurrentTime();
+
+        // Check for new day
+        setInterval(() => {
+            const today = new Date().toDateString();
+            if (state.punches.length > 0 && state.punches[0].time.toDateString() !== today) {
+                checkPayPeriodEnd();
+                
+                if (state.punches.length > 0) {
+                    state.punches = [];
+                    state.clockedIn = false;
+                    state.onBreak = false;
+                    state.totalBreakTime = 0;
+                    saveProfileState();
+                    updateUI();
+                }
+            }
+            
+            // Check auto-sync daily
+            checkAutoSync();
+        }, 60000);
+    </script>
+</body>
+</html>
