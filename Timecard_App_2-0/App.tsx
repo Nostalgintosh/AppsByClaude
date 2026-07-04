@@ -1,0 +1,3675 @@
+import React, {useState, useEffect, useRef, useCallback} from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  TextInput,
+  ScrollView,
+  Modal,
+  Alert,
+  StyleSheet,
+  Platform,
+  StatusBar,
+  Dimensions,
+  useWindowDimensions,
+  AppState,
+} from 'react-native';
+
+// ─── Fold-state hook ──────────────────────────────────────────────────────────
+// Galaxy Z Fold cover screen ≈ 369 dp, inner screen ≈ 707 dp.
+// Any device wider than 550 dp gets the two-column "unfolded" layout.
+const FOLD_BREAKPOINT = 550;
+
+function useFoldState() {
+  const {width, height} = useWindowDimensions();
+  return {
+    isUnfolded: width > FOLD_BREAKPOINT,
+    isFolded:   width <= FOLD_BREAKPOINT,
+    width,
+    height,
+  };
+}
+import {SafeAreaProvider, SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import FirebaseAuthScreen from './src/FirebaseAuthScreen';
+import {
+  onAuthStateChanged, signOut as firebaseSignOut,
+  configureGoogleSignIn, AppUser,
+} from './src/firebaseAuth';
+import ScanToPunch, {ScannedPunch} from './src/ScanToPunch';
+// (Apple Quick Sign-In replaced by FirebaseAuthScreen)
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+// Minimal session shape — now populated from Firebase user in AuthGate
+interface Session {
+  accountId:   string;
+  displayName: string;
+  email:       string;
+  token:       string;
+  expiresAt:   number;
+}
+
+interface Profile {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+/** One break taken during a shift. */
+interface BreakRecord {
+  startTime:   string;  // ISO timestamp
+  durationSec: number;  // actual seconds taken (may be less than the preset)
+  paid:        boolean;
+}
+
+interface WorkSession {
+  clockIn:     string;
+  clockOut:    string;
+  hoursWorked: number;  // already deducted for unpaid breaks
+  date:        string;
+  breaks?:     BreakRecord[]; // individual break records
+  paidBreaks?: boolean;       // snapshot of the setting when clocked out
+}
+
+interface ProfileData {
+  hourlyRate:     number;
+  payPeriod:      string;
+  workSessions:   WorkSession[];
+  isClockedIn:    boolean;
+  clockInTime:    string | null;
+  scheduleConfig?: ScheduleConfig;
+  schedule?:       WeekSchedule;
+  paidBreaks?:     boolean;
+  use24h?:         boolean;
+  darkMode?:       boolean;
+  lang?:           Lang;     // UI language
+  taxCountry?:     TaxCountry;
+  taxState?:       string;   // state/province/territory code for tax estimate
+  localCounty?:    string;
+  localCity?:      string;
+  // In-progress break (persisted so it survives an app restart).
+  // The on-screen countdown is derived from breakStartedAt + breakTargetSec
+  // (wall-clock), so it stays correct even while the app is backgrounded/killed.
+  isOnBreak?:      boolean;
+  breakStartedAt?: string | null;
+  breaksTakenSec?: number;
+  breakTargetSec?: number;  // chosen break length in seconds (e.g. 30min → 1800)
+  breakTimeLeft?:  number;  // legacy: remaining secs at last save (migration only)
+}
+
+type ActiveTab = 'punching' | 'history' | 'schedule' | 'settings';
+type TaxCountry = 'US' | 'CA';
+const ThemeContext = React.createContext(false);
+
+interface TaxRegion {
+  code: string;
+  name: string;
+  rate: number;
+}
+
+// ─── US state income-tax estimate table ─────────────────────────────────────
+// Approximate effective state income-tax rates (decimal). ESTIMATES ONLY.
+const STATE_TAX: Record<string, number> = {
+  AL: 0.04, AK: 0.0, AZ: 0.025, AR: 0.039, CA: 0.06, CO: 0.044, CT: 0.05,
+  DE: 0.052, FL: 0.0, GA: 0.0549, HI: 0.07, ID: 0.058, IL: 0.0495, IN: 0.0305,
+  IA: 0.038, KS: 0.0525, KY: 0.04, LA: 0.03, ME: 0.058, MD: 0.0475, MA: 0.05,
+  MI: 0.0425, MN: 0.068, MS: 0.044, MO: 0.0475, MT: 0.059, NE: 0.052, NV: 0.0,
+  NH: 0.0, NJ: 0.055, NM: 0.047, NY: 0.06, NC: 0.045, ND: 0.025, OH: 0.035,
+  OK: 0.0475, OR: 0.0875, PA: 0.0307, RI: 0.0475, SC: 0.064, SD: 0.0, TN: 0.0,
+  TX: 0.0, UT: 0.0465, VT: 0.066, VA: 0.0575, WA: 0.0, WV: 0.051, WI: 0.053,
+  WY: 0.0, DC: 0.06,
+};
+const STATE_NAMES: Record<string, string> = {
+  AL: 'ALABAMA', AK: 'ALASKA', AZ: 'ARIZONA', AR: 'ARKANSAS', CA: 'CALIFORNIA',
+  CO: 'COLORADO', CT: 'CONNECTICUT', DE: 'DELAWARE', FL: 'FLORIDA', GA: 'GEORGIA',
+  HI: 'HAWAII', ID: 'IDAHO', IL: 'ILLINOIS', IN: 'INDIANA', IA: 'IOWA',
+  KS: 'KANSAS', KY: 'KENTUCKY', LA: 'LOUISIANA', ME: 'MAINE', MD: 'MARYLAND',
+  MA: 'MASSACHUSETTS', MI: 'MICHIGAN', MN: 'MINNESOTA', MS: 'MISSISSIPPI',
+  MO: 'MISSOURI', MT: 'MONTANA', NE: 'NEBRASKA', NV: 'NEVADA', NH: 'NEW HAMPSHIRE',
+  NJ: 'NEW JERSEY', NM: 'NEW MEXICO', NY: 'NEW YORK', NC: 'NORTH CAROLINA',
+  ND: 'NORTH DAKOTA', OH: 'OHIO', OK: 'OKLAHOMA', OR: 'OREGON', PA: 'PENNSYLVANIA',
+  RI: 'RHODE ISLAND', SC: 'SOUTH CAROLINA', SD: 'SOUTH DAKOTA', TN: 'TENNESSEE',
+  TX: 'TEXAS', UT: 'UTAH', VT: 'VERMONT', VA: 'VIRGINIA', WA: 'WASHINGTON',
+  WV: 'WEST VIRGINIA', WI: 'WISCONSIN', WY: 'WYOMING', DC: 'WASHINGTON D.C.',
+};
+const CANADA_REGIONS: TaxRegion[] = [
+  {code: 'AB', name: 'ALBERTA', rate: 0.10},
+  {code: 'BC', name: 'BRITISH COLUMBIA', rate: 0.077},
+  {code: 'MB', name: 'MANITOBA', rate: 0.108},
+  {code: 'NB', name: 'NEW BRUNSWICK', rate: 0.094},
+  {code: 'NL', name: 'NEWFOUNDLAND AND LABRADOR', rate: 0.087},
+  {code: 'NS', name: 'NOVA SCOTIA', rate: 0.095},
+  {code: 'NT', name: 'NORTHWEST TERRITORIES', rate: 0.059},
+  {code: 'NU', name: 'NUNAVUT', rate: 0.04},
+  {code: 'ON', name: 'ONTARIO', rate: 0.07},
+  {code: 'PE', name: 'PRINCE EDWARD ISLAND', rate: 0.096},
+  {code: 'QC', name: 'QUEBEC', rate: 0.12},
+  {code: 'SK', name: 'SASKATCHEWAN', rate: 0.105},
+  {code: 'YT', name: 'YUKON', rate: 0.064},
+];
+const COUNTRY_NAMES: Record<TaxCountry, string> = {
+  US: 'UNITED STATES',
+  CA: 'CANADA',
+};
+const TAX_REGION_DATA: Record<TaxCountry, TaxRegion[]> = {
+  US: Object.keys(STATE_NAMES).sort().map(code => ({
+    code,
+    name: STATE_NAMES[code],
+    rate: STATE_TAX[code] ?? 0,
+  })),
+  CA: CANADA_REGIONS,
+};
+const DEFAULT_TAX_REGION: Record<TaxCountry, string> = {US: 'CA', CA: 'ON'};
+const normalizeTaxCountry = (country?: string): TaxCountry =>
+  country === 'CA' ? 'CA' : 'US';
+const normalizeTaxRegion = (country: TaxCountry, region?: string): string => {
+  const regions = TAX_REGION_DATA[country];
+  return regions.some(r => r.code === region) ? region! : DEFAULT_TAX_REGION[country];
+};
+const getTaxRegion = (country: TaxCountry, region: string): TaxRegion =>
+  TAX_REGION_DATA[country].find(r => r.code === region)
+  ?? TAX_REGION_DATA[country].find(r => r.code === DEFAULT_TAX_REGION[country])
+  ?? TAX_REGION_DATA[country][0];
+const FICA_RATE = 0.0765; // Social Security 6.2% + Medicare 1.45%
+
+// Estimated effective FEDERAL income-tax rate from annualized income
+// (2024 single-filer brackets, standard deduction ~$14,600).
+function federalEffectiveRate(annualIncome: number): number {
+  const taxable = Math.max(0, annualIncome - 14600);
+  const brackets: [number, number][] = [
+    [11600, 0.10], [47150, 0.12], [100525, 0.22], [191950, 0.24],
+    [243725, 0.32], [609350, 0.35], [Infinity, 0.37],
+  ];
+  let tax = 0, prev = 0;
+  for (const [cap, rate] of brackets) {
+    if (taxable > prev) { tax += (Math.min(taxable, cap) - prev) * rate; prev = cap; }
+    else break;
+  }
+  return annualIncome > 0 ? tax / annualIncome : 0;
+}
+
+// ─── Schedule types ───────────────────────────────────────────────────────────
+
+type ScheduleKey = 'sun'|'mon'|'tue'|'wed'|'thu'|'fri'|'sat';
+
+interface DaySchedule {
+  enabled: boolean;
+  startHour: number;
+  startMin:  number;
+  endHour:   number;
+  endMin:    number;
+}
+
+type WeekSchedule = Record<ScheduleKey, DaySchedule>;
+
+// ─── Rotating schedule types ──────────────────────────────────────────
+
+type ScheduleMode   = 'static' | 'pod' | 'flex';
+type RotationPeriod = 'biweekly' | 'monthly' | 'bimonthly';
+
+/** One pod in a rotating schedule (e.g. "Pod A: Mon–Wed 9-5"). */
+interface PodDef {
+  id:        string;
+  name:      string;
+  days:      ScheduleKey[];
+  startHour: number;
+  startMin:  number;
+  endHour:   number;
+  endMin:    number;
+}
+
+/**
+ * One day entry in a flex/fluctuating schedule.
+ * Keyed by 'YYYY-MM-DD' in FlexSchedule.
+ */
+interface FlexDay {
+  working:   boolean;
+  startHour: number;
+  startMin:  number;
+  endHour:   number;
+  endMin:    number;
+}
+
+/**
+ * Flex schedule — a sparse map of specific calendar dates to shift info.
+ * Dates not present in the map are treated as days off.
+ * Workers enter each week as they receive their schedule.
+ */
+type FlexSchedule = Record<string, FlexDay>; // 'YYYY-MM-DD' → FlexDay
+
+/** Unified schedule config — supports all three schedule modes. */
+interface ScheduleConfig {
+  mode:              ScheduleMode;
+  // ── Static (fixed week template) ───────────────────────────────
+  weekSchedule:      WeekSchedule;
+  // ── Pod / rotating ─────────────────────────────────────────────
+  pods:              PodDef[];
+  rotationPeriod:    RotationPeriod;
+  rotationStartDate: string;   // 'YYYY-MM-DD' — start of first rotation period
+  activePodIndex:    number;
+  // ── Flex (fluctuating week-by-week) ────────────────────────────
+  flexSchedule:      FlexSchedule;
+}
+
+// ─── Account-scoped storage ──────────────────────────────────────────────────
+
+const LEGACY_PROFILES_KEY = 'profiles';
+const LEGACY_CURRENT_PROFILE_KEY = 'currentProfile';
+const LEGACY_PROFILE_PREFIX = 'profile_';
+const PROFILE_MIGRATION_KEY = '@timecard:profiles:migrated';
+
+const accountStorageKey = (accountId: string, key: string) =>
+  `@timecard:account:${accountId}:${key}`;
+
+const profilesKey = (accountId: string) =>
+  accountStorageKey(accountId, 'profiles');
+
+const currentProfileKey = (accountId: string) =>
+  accountStorageKey(accountId, 'currentProfile');
+
+const profileDataKey = (accountId: string, profileId: string) =>
+  accountStorageKey(accountId, `profile:${profileId}`);
+
+/**
+ * Move profiles created before multi-account support into the first account
+ * that opens the upgraded app. The marker prevents later accounts from seeing
+ * the same legacy profiles.
+ */
+async function migrateLegacyProfileData(accountId: string): Promise<void> {
+  const [scopedProfiles, migratedTo, legacyProfiles] = await Promise.all([
+    AsyncStorage.getItem(profilesKey(accountId)),
+    AsyncStorage.getItem(PROFILE_MIGRATION_KEY),
+    AsyncStorage.getItem(LEGACY_PROFILES_KEY),
+  ]);
+
+  if (scopedProfiles || migratedTo || !legacyProfiles) return;
+
+  const parsed: Profile[] = JSON.parse(legacyProfiles);
+  const legacyCurrentProfile = await AsyncStorage.getItem(LEGACY_CURRENT_PROFILE_KEY);
+
+  await AsyncStorage.setItem(profilesKey(accountId), legacyProfiles);
+  if (legacyCurrentProfile && parsed.some(p => p.id === legacyCurrentProfile)) {
+    await AsyncStorage.setItem(currentProfileKey(accountId), legacyCurrentProfile);
+  }
+
+  await Promise.all(parsed.map(async profile => {
+    const data = await AsyncStorage.getItem(`${LEGACY_PROFILE_PREFIX}${profile.id}`);
+    if (data) await AsyncStorage.setItem(profileDataKey(accountId, profile.id), data);
+  }));
+
+  await AsyncStorage.setItem(PROFILE_MIGRATION_KEY, accountId);
+}
+
+// ─── Pay-period helpers ───────────────────────────────────────────────────────
+
+/**
+ * Returns a stable string key that identifies which pay period a date falls in.
+ * Used to bucket WorkSessions into folders.
+ */
+function parseStoredDate(dateStr: string): Date {
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (isoDate) return new Date(+isoDate[1], +isoDate[2] - 1, +isoDate[3]);
+  return new Date(dateStr);
+}
+
+function payPeriodKey(dateStr: string, period: string): string {
+  const d = parseStoredDate(dateStr);
+  const y = d.getFullYear();
+  const mo = d.getMonth();
+  const day = d.getDate();
+
+  switch (period) {
+    case 'weekly': {
+      // Key by the Monday that starts the week
+      const dow = d.getDay(); // 0=Sun
+      const toMonday = dow === 0 ? -6 : 1 - dow;
+      const mon = new Date(y, mo, day + toMonday);
+      return `W_${mon.getFullYear()}_${mon.getMonth()}_${mon.getDate()}`;
+    }
+    case 'bi-weekly': {
+      // Anchor: Jan 1 of the year; every 14 days is a new block
+      const anchor = new Date(y, 0, 1);
+      const diff = Math.floor(
+        (d.getTime() - anchor.getTime()) / 86_400_000,
+      );
+      const block = Math.floor(diff / 14);
+      return `BW_${y}_${block}`;
+    }
+    case 'bi-monthly':
+      return `SM_${y}_${mo}_${day <= 15 ? 1 : 2}`;
+    case 'monthly':
+      return `MO_${y}_${mo}`;
+    case 'yearly':
+      return `YR_${y}`;
+    default:
+      return `W_${y}_${mo}_${day}`;
+  }
+}
+
+/** Human-readable label for a pay-period key. */
+function payPeriodLabel(key: string): string {
+  const MONTHS_SHORT = [
+    'JAN','FEB','MAR','APR','MAY','JUN',
+    'JUL','AUG','SEP','OCT','NOV','DEC',
+  ];
+  const MONTHS_LONG = [
+    'JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE',
+    'JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER',
+  ];
+
+  if (key.startsWith('W_')) {
+    const [, ys, ms, ds] = key.split('_');
+    const mon = new Date(+ys, +ms, +ds);
+    const sun = new Date(+ys, +ms, +ds + 6);
+    return `WEEK  ${mon.toLocaleDateString()}  –  ${sun.toLocaleDateString()}`;
+  }
+  if (key.startsWith('BW_')) {
+    const [, ys, block] = key.split('_');
+    const anchor = new Date(+ys, 0, 1);
+    const start = new Date(anchor.getTime() + +block * 14 * 86_400_000);
+    const end = new Date(start.getTime() + 13 * 86_400_000);
+    return `${start.toLocaleDateString()}  –  ${end.toLocaleDateString()}`;
+  }
+  if (key.startsWith('SM_')) {
+    const [, ys, ms, half] = key.split('_');
+    const mo = MONTHS_SHORT[+ms];
+    if (+half === 1) return `${mo} 1 – 15,  ${ys}`;
+    const last = new Date(+ys, +ms + 1, 0).getDate();
+    return `${mo} 16 – ${last},  ${ys}`;
+  }
+  if (key.startsWith('MO_')) {
+    const [, ys, ms] = key.split('_');
+    return `${MONTHS_LONG[+ms]} ${ys}`;
+  }
+  if (key.startsWith('YR_')) {
+    return `FISCAL YEAR ${key.split('_')[1]}`;
+  }
+  return key;
+}
+
+/** True when the key is the current, ongoing pay period. */
+function isCurrentPeriod(key: string, period: string): boolean {
+  return key === payPeriodKey(todayStr(), period);
+}
+
+// ─── General helpers ──────────────────────────────────────────────────────────
+
+const pad2 = (n: number) => String(Math.floor(n)).padStart(2, '0');
+
+const fmtTimeLong = (d: Date, h24 = false) =>
+  h24
+    ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+    : `${pad2(d.getHours() % 12 || 12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${d.getHours() >= 12 ? 'PM' : 'AM'}`;
+
+const fmtTimeShort = (d: Date, h24 = false) =>
+  h24
+    ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    : `${pad2(d.getHours() % 12 || 12)}:${pad2(d.getMinutes())} ${d.getHours() >= 12 ? 'PM' : 'AM'}`;
+
+const fmtBreak = (sec: number) =>
+  `${pad2(sec / 60)}:${pad2(sec % 60)}`;
+
+const todayStr = () => {
+  const today = new Date();
+  return `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`;
+};
+
+const displayDate = (dateStr: string) =>
+  parseStoredDate(dateStr).toLocaleDateString();
+
+// ─── Ruled paper overlay ──────────────────────────────────────────────────────
+
+const LINE_H = 28;
+const PAPER_H = Dimensions.get('window').height * 4;
+// Pre-build static arrays once so RuledPaper never re-allocates them
+const RULED_LINES = Array.from({length: Math.ceil(PAPER_H / LINE_H)}, (_, i) => i);
+const HOLE_TOPS   = [80, 220, 360, 500];
+
+const RuledPaper = React.memo(function RuledPaper() {
+  // Offset by safe-area insets so the cream paper (and its red margin line)
+  // never bleeds into the status-bar area at the top or the home-indicator
+  // area at the bottom — both of those zones stay white and clean.
+  const {top: safeTop, bottom: safeBottom} = useSafeAreaInsets();
+  return (
+    <View
+      style={[st.ruledPaperContainer, {top: safeTop, bottom: safeBottom}]}
+      pointerEvents="none">
+      {RULED_LINES.map(i => (
+        <View key={i} style={[st.ruled, {top: i * LINE_H + LINE_H - 1}]} />
+      ))}
+      <View style={st.marginLine} />
+      {HOLE_TOPS.map(top => (
+        <View key={top} style={[st.hole, {top}]} />
+      ))}
+    </View>
+  );
+});
+
+// ─── Tab card definitions ─────────────────────────────────────────────────────
+
+const TABS: {key: ActiveTab; glyph: string; label: string; sub: string}[] = [
+  {key: 'punching',  glyph: '▶', label: 'PUNCHING',  sub: 'CLOCK IN/OUT'},
+  {key: 'history',   glyph: '≡', label: 'HISTORY',   sub: 'PAY RECORDS'},
+  {key: 'schedule',  glyph: '◷', label: 'SCHEDULE',  sub: 'CALENDAR'},
+  {key: 'settings',  glyph: '◈', label: 'SETTINGS',  sub: 'CONFIG'},
+];
+
+// ─── i18n ───────────────────────────────────────────────────────────────────
+// Spanish strings keyed by their English source. Any string not present here
+// falls back to English, so partial coverage never breaks the UI.
+type Lang = 'en' | 'es';
+const ES_STRINGS: Record<string, string> = {
+  // Tabs
+  'PUNCHING': 'FICHAR', 'CLOCK IN/OUT': 'ENTRADA/SALIDA',
+  'HISTORY': 'HISTORIAL', 'PAY RECORDS': 'REGISTROS',
+  'SCHEDULE': 'HORARIO', 'CALENDAR': 'CALENDARIO',
+  'SETTINGS': 'AJUSTES', 'CONFIG': 'CONFIG',
+  // Header / general
+  'PROFILES': 'PERFILES', '◀ PROFILES': '◀ PERFILES', 'WORKSTATION': 'ESTACIÓN',
+  'EMPLOYEE': 'EMPLEADO', 'NO PROFILE': 'SIN PERFIL',
+  'ON DUTY': 'EN TURNO', 'OFF DUTY': 'FUERA DE TURNO',
+  'HRS': 'HRS', 'EARNED': 'GANADO',
+  'THIS WEEK': 'ESTA SEMANA', 'THIS BI-WEEKLY': 'QUINCENAL',
+  'THIS SEMI-MONTHLY': 'SEMIMENSUAL', 'THIS MONTH': 'ESTE MES',
+  'THIS YEAR': 'ESTE AÑO', 'THIS PERIOD': 'ESTE PERÍODO',
+  // Punch screen
+  'STATUS: NOT CLOCKED IN': 'ESTADO: SIN FICHAR', 'NOT CLOCKED IN': 'SIN FICHAR',
+  '▬▬ OFF DUTY ▬▬': '▬▬ FUERA DE TURNO ▬▬',
+  '══════ CURRENT TIME ══════': '══════ HORA ACTUAL ══════',
+  '═══ STATUS: ON DUTY ═══': '═══ ESTADO: EN TURNO ═══',
+  'CLOCKED IN AT:': 'FICHÓ A LAS:', 'HOURS: ': 'HORAS: ',
+  '✓ PAID BREAKS': '✓ DESCANSOS PAGADOS', '✕ UNPAID BREAKS': '✕ DESCANSOS NO PAGADOS',
+  'LATE BY': 'TARDE POR', 'MIN': 'MIN', '1 HOUR': '1 HORA',
+  '┌─ SELECT BREAK DURATION ─┐': '┌─ ELIGE DURACIÓN DEL DESCANSO ─┐',
+  '☕ ON BREAK — PAID (STILL EARNING)': '☕ EN DESCANSO — PAGADO (SIGUE GANANDO)',
+  '⏸ ON BREAK — CLOCK PAUSED': '⏸ EN DESCANSO — RELOJ EN PAUSA',
+  "TIME'S UP": 'TIEMPO AGOTADO', 'RETURN AT': 'REGRESA A LAS',
+  "CLOCK BACK IN WHENEVER YOU'RE READY": 'VUELVE A FICHAR CUANDO ESTÉS LISTO',
+  '▶▶  CLOCK BACK IN  ◀◀': '▶▶  VOLVER A FICHAR  ◀◀',
+  '▶▶▶ PUNCH IN ◀◀◀': '▶▶▶ FICHAR ENTRADA ◀◀◀',
+  '▶▶▶ PUNCH OUT ◀◀◀': '▶▶▶ FICHAR SALIDA ◀◀◀',
+  '📷  SCAN TO PUNCH': '📷  ESCANEAR PARA FICHAR',
+  '📷  SCAN TO PUNCH OUT / BREAK': '📷  ESCANEAR SALIDA / DESCANSO',
+  // Earnings
+  '═══ EARNINGS SUMMARY ═══': '═══ RESUMEN DE GANANCIAS ═══',
+  "TODAY'S EARNINGS": 'GANANCIAS DE HOY', "THIS WEEK'S EARNINGS": 'GANANCIAS DE LA SEMANA',
+  'NET': 'NETO', 'HOURS WORKED': 'HORAS TRABAJADAS', 'WEEK HOURS': 'HORAS SEMANA',
+  'HOURLY RATE': 'TARIFA POR HORA', 'EST. TAX RATE': 'IMPUESTO EST.',
+  'PAY SCHEDULE': 'CALENDARIO DE PAGO',
+  'WEEKLY — NEXT': 'SEMANAL — PRÓX', 'BI-WEEKLY — NEXT': 'QUINCENAL — PRÓX',
+  'SEMI-MONTHLY — NEXT': 'SEMIMENSUAL — PRÓX', 'MONTHLY — NEXT': 'MENSUAL — PRÓX',
+  'YEARLY — NEXT': 'ANUAL — PRÓX',
+  'This is a rough time-tracking tool. Figures shown are estimates only and may not reflect 100% of your hours worked or your exact pay. Always verify earnings with your employer\'s official payroll records.':
+    'Esta es una herramienta aproximada de control de tiempo. Las cifras son solo estimaciones y pueden no reflejar el 100% de tus horas ni tu pago exacto. Verifica siempre tus ganancias con los registros oficiales de nómina de tu empleador.',
+  // Settings
+  'PAY PERIOD SCHEDULE:': 'PERÍODO DE PAGO:',
+  'WEEKLY': 'SEMANAL', 'BI-WEEKLY': 'QUINCENAL',
+  'SEMI-MONTHLY  (15TH & EOM)': 'SEMIMENSUAL  (15 Y FIN DE MES)',
+  'MONTHLY': 'MENSUAL', 'YEARLY': 'ANUAL',
+  'TAX STATE / REGION:': 'ESTADO / REGIÓN FISCAL:', 'TAX LOCATION:': 'UBICACIÓN FISCAL:',
+  'COUNTRY': 'PAÍS', 'STATE / DISTRICT': 'ESTADO / DISTRITO',
+  'PROVINCE / TERRITORY': 'PROVINCIA / TERRITORIO',
+  'COUNTY / REGION': 'CONDADO / REGIÓN', 'REGION / COUNTY': 'REGIÓN / CONDADO',
+  'CITY / TOWN': 'CIUDAD / PUEBLO', 'REGIONAL': 'REGIONAL', 'LANGUAGE:': 'IDIOMA:',
+  '═══ SCAN TO PUNCH ═══': '═══ ESCANEAR PARA FICHAR ═══',
+  'SCAN TO PUNCH': 'ESCANEAR PARA FICHAR', 'HOURLY RATE ($):': 'TARIFA POR HORA ($):',
+  'PAID BREAKS': 'DESCANSOS PAGADOS', 'UNPAID BREAKS': 'DESCANSOS NO PAGADOS',
+  'Use your device camera to photograph a company punch clock or paper timecard. The app reads the times via on-device OCR and lets you confirm before applying — works for punch-ins, punch-outs, and breaks (15 min / 30 min / 1 hour).':
+    'Usa la cámara para fotografiar un reloj checador o una tarjeta de papel. La app lee las horas con OCR en el dispositivo y te deja confirmar antes de aplicar — sirve para entradas, salidas y descansos (15 min / 30 min / 1 hora).',
+  'DARK MODE': 'MODO OSCURO', 'LIGHT MODE': 'MODO CLARO',
+  'Uses a darker workspace with brighter text for low-light use.':
+    'Usa un espacio de trabajo más oscuro con texto más claro para poca luz.',
+  'Uses the classic paper workspace.':
+    'Usa el espacio de trabajo clásico de papel.',
+  'Break time counts toward your total hours and pay.':
+    'El tiempo de descanso cuenta para tus horas y tu pago.',
+  'Break time is deducted from your total hours and pay.':
+    'El tiempo de descanso se descuenta de tus horas y tu pago.',
+  'ENGLISH': 'INGLÉS', 'SPANISH / ESPAÑOL': 'ESPAÑOL',
+  '▼ CONFIGURATION SETTINGS': '▼ AJUSTES DE CONFIGURACIÓN',
+  '═══ ACCOUNT ═══': '═══ CUENTA ═══', 'SIGNED IN AS:': 'SESIÓN INICIADA COMO:',
+  'To update your name or email, use your Google / Apple / email account settings.':
+    'Para actualizar tu nombre o correo, usa los ajustes de tu cuenta de Google / Apple / correo.',
+  '● FIREBASE AUTH ACTIVE': '● AUTENTICACIÓN FIREBASE ACTIVA', 'SIGN OUT': 'CERRAR SESIÓN',
+  'Cancel': 'Cancelar',
+  'You will need your password to access the app again.':
+    'Necesitarás tu contraseña para volver a acceder a la app.',
+  '24-HOUR TIME': 'HORA DE 24 HORAS', '12-HOUR TIME (AM/PM)': 'HORA DE 12 HORAS (AM/PM)',
+  'Times shown in 24-hour format — e.g. 14:30 instead of 2:30 PM.':
+    'Horas en formato de 24 horas — p. ej. 14:30 en vez de 2:30 PM.',
+  'Times shown with AM / PM — e.g. 2:30 PM instead of 14:30.':
+    'Horas con AM / PM — p. ej. 2:30 PM en vez de 14:30.',
+  // Tax box
+  'FEDERAL (EST.)': 'FEDERAL (EST.)', 'STATE TAX': 'IMPUESTO ESTATAL',
+  'FICA (SS+MED)': 'FICA (SS+MED)', 'EFFECTIVE RATE': 'TASA EFECTIVA',
+  'NET TAKE-HOME': 'NETO A RECIBIR',
+  'NO STATE INCOME TAX': 'SIN IMPUESTO ESTATAL', 'STATE': 'ESTATAL',
+  '* ESTIMATE ONLY — NOT TAX ADVICE': '* SOLO ESTIMACIÓN — NO ES ASESORÍA FISCAL',
+  // Widget
+  'TIME CARD': 'TARJETA', 'ON BREAK': 'EN DESCANSO',
+  '▶ PUNCH IN': '▶ FICHAR', '☕ BREAK': '☕ DESCANSO',
+  '▶ CLOCK BACK IN': '▶ VOLVER', '▶ PUNCH OUT': '▶ SALIR', '▣ CARD': '▣ TARJETA',
+};
+
+// ─── Schedule constants ───────────────────────────────────────────────────────
+
+const SCHED_DAYS:   ScheduleKey[] = ['sun','mon','tue','wed','thu','fri','sat'];
+const SCHED_SHORT  = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+const MONTH_NAMES  = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December'];
+
+const DEFAULT_WEEK_SCHEDULE: WeekSchedule = {
+  sun: {enabled:false, startHour:9, startMin:0, endHour:17, endMin:0},
+  mon: {enabled:true,  startHour:9, startMin:0, endHour:17, endMin:0},
+  tue: {enabled:true,  startHour:9, startMin:0, endHour:17, endMin:0},
+  wed: {enabled:true,  startHour:9, startMin:0, endHour:17, endMin:0},
+  thu: {enabled:true,  startHour:9, startMin:0, endHour:17, endMin:0},
+  fri: {enabled:true,  startHour:9, startMin:0, endHour:17, endMin:0},
+  sat: {enabled:false, startHour:9, startMin:0, endHour:17, endMin:0},
+};
+
+const TODAY_ISO = new Date().toISOString().split('T')[0];
+
+const DEFAULT_SCHED_CFG: ScheduleConfig = {
+  mode:              'static',
+  weekSchedule:      DEFAULT_WEEK_SCHEDULE,
+  pods: [
+    {id:'pod-a', name:'Pod A', days:['mon','tue','wed'], startHour:9, startMin:0, endHour:17, endMin:0},
+    {id:'pod-b', name:'Pod B', days:['thu','fri','sat'], startHour:9, startMin:0, endHour:17, endMin:0},
+  ],
+  rotationPeriod:    'monthly',
+  rotationStartDate: TODAY_ISO,
+  activePodIndex:    0,
+  flexSchedule:      {},
+};
+
+/** Format a Date as 'YYYY-MM-DD' for use as a FlexSchedule key. */
+function toDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+/** Return the Monday of the week containing `d`. */
+function weekMonday(d: Date): Date {
+  const day  = d.getDay();              // 0=Sun
+  const diff = day === 0 ? -6 : 1 - day;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOT — handles auth gate before anything else renders
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function AppRoot() {
+  return (
+    <SafeAreaProvider>
+      <AuthGate />
+    </SafeAreaProvider>
+  );
+}
+
+type AuthState = 'loading' | 'auth' | 'app';
+
+function AuthGate() {
+  const [authState, setAuthState] = useState<AuthState>('loading');
+  const [fbUser,    setFbUser]    = useState<AppUser | null>(null);
+
+  // Configure Google Sign-In once
+  useEffect(() => { configureGoogleSignIn(); }, []);
+
+  // Firebase auth state listener — fires immediately with cached user.
+  // Retries once after 500 ms in case the native module isn't ready yet.
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const attach = (attempt: number) => {
+      try {
+        unsub = onAuthStateChanged(user => {
+          if (user) { setFbUser(user); setAuthState('app'); }
+          else      { setFbUser(null); setAuthState('auth'); }
+        });
+      } catch {
+        if (attempt === 0) {
+          // Native module may not be ready — wait 500 ms and try once more
+          retryTimer = setTimeout(() => attach(1), 500);
+        } else {
+          // Still failing — show auth screen (Firebase not configured)
+          setAuthState('auth');
+        }
+      }
+    };
+
+    attach(0);
+    return () => {
+      clearTimeout(retryTimer);
+      try { unsub?.(); } catch {}
+    };
+  }, []);
+
+  const handleSignOut = async () => {
+    await firebaseSignOut();
+    setFbUser(null);
+    setAuthState('auth');
+  };
+
+  if (authState === 'loading') {
+    return (
+      <SafeAreaView style={st.authSplash}>
+        <Text style={st.authSplashTitle}>TIMECARD</Text>
+      </SafeAreaView>
+    );
+  }
+
+  if (authState === 'auth') {
+    return <FirebaseAuthScreen onSuccess={u => { setFbUser(u); setAuthState('app'); }} />;
+  }
+
+  // Build a Session-compatible object from the Firebase user for the App component
+  const session = {
+    accountId:   fbUser!.uid,
+    displayName: fbUser!.displayName ?? fbUser!.email?.split('@')[0] ?? 'Employee',
+    email:       fbUser!.email ?? '',
+    token:       fbUser!.uid,
+    expiresAt:   Date.now() + 365 * 24 * 3600_000,
+  };
+
+  return (
+    <App
+      session={session}
+      onSignOut={handleSignOut}
+    />
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN APP
+// ─────────────────────────────────────────────────────────────────────────────
+
+function App({
+  session,
+  onSignOut,
+}: {
+  session: Session;
+  onSignOut: () => void;
+}) {
+  // — profiles —
+  const [profiles, setProfiles]               = useState<Profile[]>([]);
+  const [profilesLoaded, setProfilesLoaded]   = useState(false);
+  const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
+  const [loadedProfileId, setLoadedProfileId] = useState<string | null>(null);
+  const [showProfileScreen, setShowProfileScreen] = useState(true);
+  const [showNewProfileModal, setShowNewProfileModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal]   = useState(false);
+  const [profileToDelete, setProfileToDelete]   = useState<string | null>(null);
+  const [newProfileName, setNewProfileName]     = useState('');
+
+  // — work data —
+  const [hourlyRate, setHourlyRate]   = useState(15);
+  const [hourlyRateInput, setHourlyRateInput] = useState('15');
+  const [payPeriod, setPayPeriod]     = useState('weekly');
+  const [isClockedIn, setIsClockedIn] = useState(false);
+  const [clockInTime, setClockInTime] = useState<Date | null>(null);
+  const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
+
+  // — break —
+  const [isOnBreak,       setIsOnBreak]       = useState(false);
+  // Countdown shown on screen. DERIVED from breakStartedAt + breakTargetSec on
+  // every tick, so it never drifts while the app is backgrounded or killed.
+  const [breakTimeLeft,   setBreakTimeLeft]   = useState(0);
+  // The chosen break length (seconds). Persisted so the countdown can be
+  // re-derived after a restart instead of resuming from a stale snapshot.
+  const [breakTargetSec,  setBreakTargetSec]  = useState(0);
+  const breakRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Tracks cumulative unpaid break time taken this shift (seconds).
+  // Reset on every clock-in.
+  const [breaksTakenSec,  setBreaksTakenSec]  = useState(0);
+  const breakStartedAt  = useRef<Date | null>(null);
+  // Accumulates individual BreakRecords for the current shift
+  const breakRecordsRef = useRef<BreakRecord[]>([]);
+
+  // — pay / display settings —
+  const [paidBreaks, setPaidBreaks] = useState(true);
+  const [use24h,     setUse24h]     = useState(false);
+  const [darkMode,   setDarkMode]   = useState(false);
+  const [taxCountry, setTaxCountry] = useState<TaxCountry>('US');
+  const [taxState,   setTaxState]   = useState('CA');
+  const [localCounty, setLocalCounty] = useState('');
+  const [localCity,   setLocalCity]   = useState('');
+  const [countryMenuOpen, setCountryMenuOpen] = useState(false);
+  const [regionMenuOpen,  setRegionMenuOpen]  = useState(false);
+  const [lang,       setLang]       = useState<Lang>('en');
+  // Translate an English source string; falls back to English if untranslated.
+  const t = (s: string) => (lang === 'es' ? (ES_STRINGS[s] ?? s) : s);
+  const selectedTaxRegion = getTaxRegion(taxCountry, taxState);
+  const selectTaxCountry = (country: TaxCountry) => {
+    setTaxCountry(country);
+    setTaxState(prev => normalizeTaxRegion(country, prev));
+    setCountryMenuOpen(false);
+    setRegionMenuOpen(false);
+  };
+  const selectTaxRegion = (region: string) => {
+    setTaxState(normalizeTaxRegion(taxCountry, region));
+    setRegionMenuOpen(false);
+  };
+
+
+  // — scan-to-punch —
+  const [scanEnabled,  setScanEnabled]  = useState(true);
+
+  // — schedule (unified static + pod) —
+  const [schedCfg, setSchedCfg] = useState<ScheduleConfig>(DEFAULT_SCHED_CFG);
+
+  // — UI —
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [activeTab, setActiveTab]     = useState<ActiveTab>('punching');
+  // tracks which pay-period folders are expanded in history
+  const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
+  // calendar navigation
+  const now0 = new Date();
+  const [calYear,  setCalYear]  = useState(now0.getFullYear());
+  const [calMonth, setCalMonth] = useState(now0.getMonth());
+  // flex schedule — week editor navigation (defaults to current week's Monday)
+  const [flexWeekStart, setFlexWeekStart] = useState(() => weekMonday(new Date()));
+
+  // profileIdRef: always current, avoids stale-closure writes
+  const profileIdRef = useRef<string | null>(null);
+  useEffect(() => { profileIdRef.current = currentProfileId; }, [currentProfileId]);
+
+  // ── Load on mount ─────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await migrateLegacyProfileData(session.accountId);
+        const raw     = await AsyncStorage.getItem(profilesKey(session.accountId));
+        const savedId = await AsyncStorage.getItem(currentProfileKey(session.accountId));
+        if (cancelled) return;
+        if (raw) {
+          const parsed: Profile[] = JSON.parse(raw);
+          setProfiles(parsed);
+          if (savedId && parsed.find(p => p.id === savedId)) {
+            setCurrentProfileId(savedId);
+            setShowProfileScreen(false);
+          }
+        }
+      } catch {
+        if (!cancelled) setProfiles([]);
+      } finally {
+        if (!cancelled) setProfilesLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [session.accountId]);
+
+  // ── Persist profile list ──────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!profilesLoaded) return;
+    if (profiles.length > 0) {
+      AsyncStorage.setItem(profilesKey(session.accountId), JSON.stringify(profiles));
+    } else {
+      AsyncStorage.removeItem(profilesKey(session.accountId));
+    }
+  }, [profiles, profilesLoaded, session.accountId]);
+
+  // ── Load per-profile data ─────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!currentProfileId) {
+      setLoadedProfileId(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadedProfileId(null);
+    AsyncStorage.setItem(currentProfileKey(session.accountId), currentProfileId);
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(profileDataKey(session.accountId, currentProfileId));
+        if (cancelled) return;
+        if (raw) {
+          const d: ProfileData = JSON.parse(raw);
+          setHourlyRate(d.hourlyRate ?? 15);
+          setHourlyRateInput(String(d.hourlyRate ?? 15));
+          setPayPeriod(d.payPeriod ?? 'weekly');
+          setWorkSessions(d.workSessions ?? []);
+          setIsClockedIn(d.isClockedIn ?? false);
+          setClockInTime(d.clockInTime ? new Date(d.clockInTime) : null);
+          // Migrate legacy 'schedule' field → new ScheduleConfig
+          if (d.scheduleConfig) {
+            // Merge with defaults so any new fields added after the save are present
+            setSchedCfg({...DEFAULT_SCHED_CFG, ...d.scheduleConfig,
+              flexSchedule: d.scheduleConfig.flexSchedule ?? {}});
+          } else if (d.schedule) {
+            setSchedCfg({...DEFAULT_SCHED_CFG, mode:'static', weekSchedule: d.schedule});
+          } else {
+            setSchedCfg(DEFAULT_SCHED_CFG);
+          }
+          setPaidBreaks(d.paidBreaks ?? true);
+          setUse24h(d.use24h ?? false);
+          setDarkMode(d.darkMode ?? false);
+          {
+            const nextCountry = normalizeTaxCountry(d.taxCountry);
+            setTaxCountry(nextCountry);
+            setTaxState(normalizeTaxRegion(nextCountry, d.taxState));
+          }
+          setLocalCounty(d.localCounty ?? '');
+          setLocalCity(d.localCity ?? '');
+          setLang(d.lang === 'es' ? 'es' : 'en');
+          // Restore any in-progress break so it survives an app restart.
+          // The countdown is re-derived from wall-clock elapsed time, so any
+          // minutes that passed while the app was closed are correctly counted.
+          if (d.isOnBreak && d.breakStartedAt) {
+            const startedAt = new Date(d.breakStartedAt);
+            breakStartedAt.current = startedAt;
+            const elapsed = Math.floor((Date.now() - startedAt.getTime()) / 1000);
+            // Prefer the persisted target; fall back to migrating legacy data
+            // (old builds saved only the remaining time, not the target).
+            const target = d.breakTargetSec ?? (elapsed + (d.breakTimeLeft ?? 0));
+            setBreakTargetSec(target);
+            setBreaksTakenSec(d.breaksTakenSec ?? 0);
+            setBreakTimeLeft(Math.max(0, target - elapsed));
+            setIsOnBreak(true);
+          } else {
+            setIsOnBreak(false); setBreakTimeLeft(0); setBreakTargetSec(0);
+            setBreaksTakenSec(0); breakStartedAt.current = null;
+          }
+        } else {
+          setHourlyRate(15); setHourlyRateInput('15');
+          setPayPeriod('weekly'); setWorkSessions([]);
+          setIsClockedIn(false); setClockInTime(null);
+          setSchedCfg(DEFAULT_SCHED_CFG);
+          setPaidBreaks(true);
+          setUse24h(false);
+          setDarkMode(false);
+          setTaxCountry('US');
+          setTaxState('CA');
+          setLocalCounty('');
+          setLocalCity('');
+          setLang('en');
+          setIsOnBreak(false); setBreakTimeLeft(0); setBreakTargetSec(0);
+          setBreaksTakenSec(0); breakStartedAt.current = null;
+        }
+        breakRecordsRef.current = [];
+        setOpenFolders(new Set()); // collapse all folders on profile switch
+        setLoadedProfileId(currentProfileId);
+      } catch {
+        if (!cancelled) {
+          setHourlyRate(15); setHourlyRateInput('15');
+          setPayPeriod('weekly'); setWorkSessions([]);
+          setIsClockedIn(false); setClockInTime(null);
+          setDarkMode(false);
+          setTaxCountry('US'); setTaxState('CA');
+          setLocalCounty(''); setLocalCity('');
+          setIsOnBreak(false); setBreakTimeLeft(0); setBreakTargetSec(0);
+          setBreaksTakenSec(0); breakStartedAt.current = null;
+          setOpenFolders(new Set());
+          setLoadedProfileId(currentProfileId);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentProfileId, session.accountId]);
+
+  // ── Auto-save ─────────────────────────────────────────────────────────────
+
+  const saveData = useCallback(async () => {
+    const id = profileIdRef.current;
+    if (!id || loadedProfileId !== id) return;
+    await AsyncStorage.setItem(profileDataKey(session.accountId, id), JSON.stringify({
+      hourlyRate, payPeriod, workSessions, isClockedIn,
+      clockInTime: clockInTime?.toISOString() ?? null,
+      scheduleConfig: schedCfg,
+      paidBreaks,
+      use24h,
+      darkMode,
+      lang,
+      taxCountry,
+      taxState,
+      localCounty,
+      localCity,
+      // Persist in-progress break so it survives an app restart. We store the
+      // start time + target (not the ticking countdown), so the remaining time
+      // is re-derived from wall-clock on reload — and we avoid a write/second.
+      isOnBreak,
+      breakStartedAt: breakStartedAt.current?.toISOString() ?? null,
+      breaksTakenSec,
+      breakTargetSec,
+    } as ProfileData));
+  }, [
+    session.accountId, loadedProfileId, hourlyRate, payPeriod, workSessions,
+    isClockedIn, clockInTime, schedCfg, paidBreaks, use24h, darkMode, lang, taxCountry,
+    taxState, localCounty, localCity,
+    isOnBreak, breaksTakenSec, breakTargetSec,
+  ]);
+
+  useEffect(() => { saveData(); }, [saveData]);
+
+  // Language is persisted per-profile in ProfileData (see load/saveData),
+  // reusing the proven profile-data persistence.
+
+  // ── Clock tick ────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const tick = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  // ── Break countdown ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!isOnBreak) return;
+    // Derive the remaining time from the start timestamp on every tick rather
+    // than decrementing a counter. This self-heals after the OS suspends the
+    // JS thread (backgrounded) or kills the app: the very next tick recomputes
+    // against the real wall-clock. Counts down to zero, then HOLDS — the break
+    // stays active and the clock paused until the person taps CLOCK BACK IN.
+    const recompute = () => {
+      const startedAt = breakStartedAt.current;
+      if (!startedAt) return;
+      const elapsed = Math.floor((Date.now() - startedAt.getTime()) / 1000);
+      setBreakTimeLeft(Math.max(0, breakTargetSec - elapsed));
+    };
+    recompute();
+    breakRef.current = setInterval(recompute, 1000);
+    return () => { if (breakRef.current) clearInterval(breakRef.current); };
+  }, [isOnBreak, breakTargetSec]);
+
+  // When the app returns to the foreground, immediately re-derive the break
+  // countdown (background timers are throttled/suspended by the OS).
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active' && isOnBreak && breakStartedAt.current) {
+        const elapsed = Math.floor(
+          (Date.now() - breakStartedAt.current.getTime()) / 1000,
+        );
+        setBreakTimeLeft(Math.max(0, breakTargetSec - elapsed));
+      }
+    });
+    return () => sub.remove();
+  }, [isOnBreak, breakTargetSec]);
+
+  const startBreak = (min: number) => {
+    breakStartedAt.current = new Date();
+    setBreakTargetSec(min * 60);
+    setBreakTimeLeft(min * 60);
+    setIsOnBreak(true);
+  };
+
+  const endBreak = () => {
+    if (breakStartedAt.current) {
+      const elapsed = Math.round((Date.now() - breakStartedAt.current.getTime()) / 1000);
+      setBreaksTakenSec(prev => prev + elapsed);
+      breakRecordsRef.current = [
+        ...breakRecordsRef.current,
+        {startTime: breakStartedAt.current.toISOString(), durationSec: elapsed, paid: paidBreaks},
+      ];
+      breakStartedAt.current = null;
+    }
+    setIsOnBreak(false); setBreakTimeLeft(0); setBreakTargetSec(0);
+    if (breakRef.current) clearInterval(breakRef.current);
+  };
+
+  // ── Punch ─────────────────────────────────────────────────────────────────
+
+  const handleClockIn = () => {
+    setClockInTime(new Date());
+    setIsClockedIn(true);
+    setBreaksTakenSec(0);
+    setBreakTargetSec(0);
+    breakStartedAt.current  = null;
+    breakRecordsRef.current = [];
+  };
+  const handleClockOut = () => {
+    if (!clockInTime) return;
+    const now     = new Date();
+    const totalMs = now.getTime() - clockInTime.getTime();
+    // Capture any in-progress break before closing the session
+    let finalBreakSec = breaksTakenSec;
+    if (isOnBreak && breakStartedAt.current) {
+      finalBreakSec += Math.round((Date.now() - breakStartedAt.current.getTime()) / 1000);
+    }
+    const deductMs    = paidBreaks ? 0 : finalBreakSec * 1000;
+    // Capture any break still in progress before saving
+    let finalRecords = [...breakRecordsRef.current];
+    if (isOnBreak && breakStartedAt.current) {
+      const elapsed = Math.round((Date.now() - breakStartedAt.current.getTime()) / 1000);
+      finalRecords.push({startTime: breakStartedAt.current.toISOString(), durationSec: elapsed, paid: paidBreaks});
+    }
+    const completedSession: WorkSession = {
+      clockIn:     clockInTime.toISOString(),
+      clockOut:    now.toISOString(),
+      hoursWorked: Math.max(0, (totalMs - deductMs) / 3_600_000),
+      date:        todayStr(),
+      breaks:      finalRecords.length > 0 ? finalRecords : undefined,
+      paidBreaks,
+    };
+    setWorkSessions(prev => [completedSession, ...prev]);
+    setIsClockedIn(false); setClockInTime(null); endBreak();
+    setBreaksTakenSec(0); breakStartedAt.current = null;
+    breakRecordsRef.current = [];
+    const key = payPeriodKey(completedSession.date, payPeriod);
+    setOpenFolders(prev => new Set([...prev, key]));
+  };
+
+  /** Apply a list of scanned punches from the ScanToPunch scanner. */
+  const applyScannedPunches = (punches: ScannedPunch[]) => {
+    // Sort chronologically
+    const sorted = [...punches].sort((a, b) => a.time.getTime() - b.time.getTime());
+
+    let pendingClockIn: Date | null = clockInTime;
+    let pendingBreaks: BreakRecord[] = [];
+
+    for (const p of sorted) {
+      if (p.type === 'in') {
+        pendingClockIn = p.time;
+        pendingBreaks = [];
+        setClockInTime(p.time);
+        setIsClockedIn(true);
+      } else if (p.type === 'out' && pendingClockIn) {
+        const breakSec = pendingBreaks.reduce((sum, br) => sum + br.durationSec, 0);
+        const deductMs = paidBreaks ? 0 : breakSec * 1000;
+        const scannedSession: WorkSession = {
+          clockIn:     pendingClockIn.toISOString(),
+          clockOut:    p.time.toISOString(),
+          hoursWorked: Math.max(0, (p.time.getTime() - pendingClockIn.getTime() - deductMs) / 3_600_000),
+          date:        toDateKey(p.time),
+          breaks:      pendingBreaks.length > 0 ? pendingBreaks : undefined,
+          paidBreaks,
+        };
+        setWorkSessions(prev => [scannedSession, ...prev]);
+        setIsClockedIn(false);
+        setClockInTime(null);
+        pendingClockIn = null;
+        pendingBreaks = [];
+        const key = payPeriodKey(scannedSession.date, payPeriod);
+        setOpenFolders(prev => new Set([...prev, key]));
+      } else if (p.type === 'break' && p.breakMins) {
+        if (pendingClockIn) {
+          pendingBreaks.push({
+            startTime:   p.time.toISOString(),
+            durationSec: p.breakMins * 60,
+            paid:        paidBreaks,
+          });
+        } else if (isClockedIn) {
+          // If the scan only contains a break while currently clocked in,
+          // treat it like the user selected a live break duration.
+          startBreak(p.breakMins);
+        }
+      }
+    }
+  };
+
+  // ── Calculations ──────────────────────────────────────────────────────────
+
+  const shiftHours = () => {
+    if (!isClockedIn || !clockInTime) return 0;
+    const totalMs   = currentTime.getTime() - clockInTime.getTime();
+    // Include any still-running break in the deduction for live display
+    const runningBreakSec = (isOnBreak && breakStartedAt.current)
+      ? Math.round((currentTime.getTime() - breakStartedAt.current.getTime()) / 1000)
+      : 0;
+    const deductMs = paidBreaks ? 0 : (breaksTakenSec + runningBreakSec) * 1000;
+    return Math.max(0, (totalMs - deductMs) / 3_600_000);
+  };
+
+  const todayHours  = () => {
+    const today = todayStr();
+    return workSessions.filter(s => s.date === today)
+      .reduce((a, s) => a + s.hoursWorked, 0) + (isClockedIn ? shiftHours() : 0);
+  };
+  const todayPay = () => todayHours() * hourlyRate;
+
+  /** Hours/earnings for the current calendar week (Mon–Sun). */
+  const weekHours = () => {
+    const start = weekMonday(new Date());   // fresh local midnight Monday
+    const past  = workSessions
+      .filter(s => new Date(s.clockIn) >= start)
+      .reduce((a, s) => a + s.hoursWorked, 0);
+    return past + (isClockedIn ? shiftHours() : 0);
+  };
+  const weekPay = () => weekHours() * hourlyRate;
+
+  // ── Tax estimate (federal + state + FICA → net take-home) ─────────────────
+  const taxBreakdown = () => {
+    const annual  = hourlyRate * 2080;            // 40h × 52wk
+    const federal = federalEffectiveRate(annual);
+    const state   = selectedTaxRegion.rate;
+    const total   = Math.min(0.6, federal + state + FICA_RATE);
+    return {federal, state, fica: FICA_RATE, total};
+  };
+  const netOf = (gross: number) => gross * (1 - taxBreakdown().total);
+
+  /** Hours worked in the current pay period (past sessions + live shift). */
+  const periodHours = React.useMemo(() => {
+    const currentKey = payPeriodKey(todayStr(), payPeriod);
+    const past = workSessions
+      .filter(s => payPeriodKey(s.date, payPeriod) === currentKey)
+      .reduce((a, s) => a + s.hoursWorked, 0);
+    return past + (isClockedIn ? shiftHours() : 0);
+  // shiftHours() reads currentTime — include it to re-run every tick
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workSessions, payPeriod, isClockedIn, currentTime]);
+
+  const periodPay = periodHours * hourlyRate;
+
+  /** Short label for the pay period type shown in the header stat bar. */
+  const periodLabel = (): string => {
+    switch (payPeriod) {
+      case 'weekly':     return 'THIS WEEK';
+      case 'bi-weekly':  return 'THIS BI-WEEKLY';
+      case 'bi-monthly': return 'THIS SEMI-MONTHLY';
+      case 'monthly':    return 'THIS MONTH';
+      case 'yearly':     return 'THIS YEAR';
+      default:           return 'THIS PERIOD';
+    }
+  };
+
+  const nextPayday = (): string => {
+    const now = new Date();
+    const dow = now.getDay();
+    const dom = now.getDate();
+    let next = new Date(now);
+    switch (payPeriod) {
+      case 'weekly': {
+        next.setDate(dom + (((5 - dow + 7) % 7) || 7));
+        return `${t('WEEKLY — NEXT')} ${next.toLocaleDateString()}`;
+      }
+      case 'bi-weekly': {
+        const wn = Math.floor((now.getTime() - new Date(now.getFullYear(),0,1).getTime()) / 604_800_000);
+        next.setDate(dom + (((5-dow+7)%7)||7) + (wn%2===0 ? 0 : 7));
+        return `${t('BI-WEEKLY — NEXT')} ${next.toLocaleDateString()}`;
+      }
+      case 'bi-monthly':
+        // dom < 15  → upcoming 15th
+        // dom >= 15 → 1st of next month (EOM pay already happened or is today)
+        next = dom < 15
+          ? new Date(now.getFullYear(), now.getMonth(), 15)
+          : new Date(now.getFullYear(), now.getMonth()+1, 1);
+        return `${t('SEMI-MONTHLY — NEXT')} ${next.toLocaleDateString()}`;
+      case 'monthly':
+        next = new Date(now.getFullYear(), now.getMonth()+1, 1);
+        return `${t('MONTHLY — NEXT')} ${next.toLocaleDateString()}`;
+      case 'yearly':
+        return `${t('YEARLY — NEXT')} ${new Date(now.getFullYear(), 11, 31).toLocaleDateString()}`;
+      default: return payPeriod.toUpperCase();
+    }
+  };
+
+  // ── Schedule helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Given a calendar date, return which pod is currently active.
+   * Rotation starts from `rotationStartDate`, each period advancing the pod
+   * index by 1 (wrapping around the pod array).
+   */
+  const getActivePodForDate = (date: Date): PodDef | null => {
+    if (schedCfg.mode !== 'pod' || schedCfg.pods.length === 0) return null;
+    const start = new Date(schedCfg.rotationStartDate + 'T00:00:00');
+    let periods  = 0;
+    switch (schedCfg.rotationPeriod) {
+      case 'biweekly': {
+        const diffDays = Math.floor((date.getTime() - start.getTime()) / 86_400_000);
+        periods        = Math.floor(Math.max(0, diffDays) / 14);
+        break;
+      }
+      case 'monthly': {
+        const diff = (date.getFullYear() - start.getFullYear()) * 12
+                   + (date.getMonth() - start.getMonth());
+        periods    = Math.max(0, diff);
+        break;
+      }
+      case 'bimonthly': {
+        const diff = (date.getFullYear() - start.getFullYear()) * 12
+                   + (date.getMonth() - start.getMonth());
+        periods    = Math.floor(Math.max(0, diff) / 2);
+        break;
+      }
+    }
+    const idx = (schedCfg.activePodIndex + periods) % schedCfg.pods.length;
+    return schedCfg.pods[idx];
+  };
+
+  /** Scheduled start (minutes since midnight) for a given date, or null if off. */
+  const scheduledStartFor = (date: Date): {startMin: number; name?: string} | null => {
+    if (schedCfg.mode === 'static') {
+      const day = schedCfg.weekSchedule[SCHED_DAYS[date.getDay()]];
+      if (!day.enabled) return null;
+      return {startMin: day.startHour * 60 + day.startMin};
+    }
+    if (schedCfg.mode === 'flex') {
+      const entry = (schedCfg.flexSchedule ?? {})[toDateKey(date)];
+      if (!entry?.working) return null;
+      return {startMin: entry.startHour * 60 + entry.startMin};
+    }
+    // pod
+    const pod = getActivePodForDate(date);
+    if (!pod || !pod.days.includes(SCHED_DAYS[date.getDay()])) return null;
+    return {startMin: pod.startHour * 60 + pod.startMin, name: pod.name};
+  };
+
+  /** Update or remove a specific date's entry in the flex schedule. */
+  const updateFlexDay = (date: Date, patch: Partial<FlexDay>) => {
+    const key     = toDateKey(date);
+    const current = (schedCfg.flexSchedule ?? {})[key] ?? {working:false, startHour:9, startMin:0, endHour:17, endMin:0};
+    setSchedCfg(prev => ({
+      ...prev,
+      flexSchedule: {...prev.flexSchedule, [key]: {...current, ...patch}},
+    }));
+  };
+
+  /** Returns minutes late if clocked in late today, else null. */
+  const lateMinutes = (): number | null => {
+    if (!isClockedIn || !clockInTime) return null;
+    const sched = scheduledStartFor(clockInTime);
+    if (!sched) return null;
+    const actual = clockInTime.getHours() * 60 + clockInTime.getMinutes();
+    const diff   = actual - sched.startMin;
+    return diff > 1 ? diff : null;
+  };
+
+  /** Update a day in the static week schedule. */
+  const updateDaySchedule = (key: ScheduleKey, patch: Partial<DaySchedule>) =>
+    setSchedCfg(prev => ({
+      ...prev,
+      weekSchedule: {...prev.weekSchedule, [key]: {...prev.weekSchedule[key], ...patch}},
+    }));
+
+  /** Pod CRUD helpers */
+  const addPod = () =>
+    setSchedCfg(prev => ({
+      ...prev,
+      pods: [...prev.pods, {
+        id:        Date.now().toString(),
+        name:      `Pod ${String.fromCharCode(65 + prev.pods.length)}`,
+        days:      [],
+        startHour: 9, startMin: 0, endHour: 17, endMin: 0,
+      }],
+    }));
+
+  const updatePod = (id: string, patch: Partial<PodDef>) =>
+    setSchedCfg(prev => ({
+      ...prev,
+      pods: prev.pods.map(p => p.id === id ? {...p, ...patch} : p),
+    }));
+
+  const removePod = (id: string) =>
+    setSchedCfg(prev => ({
+      ...prev,
+      pods:           prev.pods.filter(p => p.id !== id),
+      activePodIndex: 0,
+    }));
+
+  const togglePodDay = (podId: string, day: ScheduleKey) =>
+    setSchedCfg(prev => ({
+      ...prev,
+      pods: prev.pods.map(p => {
+        if (p.id !== podId) return p;
+        const days = p.days.includes(day)
+          ? p.days.filter(d => d !== day)
+          : [...p.days, day];
+        return {...p, days};
+      }),
+    }));
+
+  /** Human-readable label for when the next rotation happens. */
+  const nextRotationLabel = (): string => {
+    if (schedCfg.mode !== 'pod' || schedCfg.pods.length < 2) return '';
+    const today = new Date();
+    const start = new Date(schedCfg.rotationStartDate + 'T00:00:00');
+    let next: Date;
+    switch (schedCfg.rotationPeriod) {
+      case 'biweekly': {
+        const diffDays = Math.floor((today.getTime() - start.getTime()) / 86_400_000);
+        const daysTill = 14 - (diffDays % 14);
+        next = new Date(today.getTime() + daysTill * 86_400_000);
+        break;
+      }
+      case 'monthly': {
+        next = new Date(today.getFullYear(), today.getMonth() + 1, start.getDate() || 1);
+        break;
+      }
+      case 'bimonthly': {
+        const diff   = (today.getFullYear() - start.getFullYear()) * 12
+                     + (today.getMonth() - start.getMonth());
+        const offset = 2 - (diff % 2);
+        next = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+        break;
+      }
+      default: return '';
+    }
+    return next.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+  };
+
+  /**
+   * Build calendar grid for (calYear, calMonth).
+   * Returns an array of 6 week-rows, each with 7 cells (null = padding).
+   */
+  const buildCalendar = () => {
+    const firstDay    = new Date(calYear, calMonth, 1).getDay();
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+    const today       = new Date();
+
+    type Cell = null | {
+      date: number;
+      isToday: boolean;
+      isScheduled: boolean;
+      hasPunch: boolean;
+      lateMin: number | null;
+    };
+
+    const cells: Cell[] = Array(firstDay).fill(null);
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dayDate    = new Date(calYear, calMonth, d);
+      const schedInfo  = scheduledStartFor(dayDate);
+      const isScheduled = schedInfo !== null;
+
+      const daySessions = workSessions.filter(s => {
+        const sd = new Date(s.clockIn);
+        return sd.getFullYear() === calYear &&
+               sd.getMonth()    === calMonth &&
+               sd.getDate()     === d;
+      });
+
+      let lateMin: number | null = null;
+      if (daySessions.length > 0 && schedInfo) {
+        const fp     = new Date(daySessions[0].clockIn);
+        const actual = fp.getHours() * 60 + fp.getMinutes();
+        const diff   = actual - schedInfo.startMin;
+        lateMin      = diff > 1 ? diff : null;
+      }
+
+      cells.push({
+        date:        d,
+        isToday:     today.getFullYear() === calYear && today.getMonth() === calMonth && today.getDate() === d,
+        isScheduled,
+        hasPunch:    daySessions.length > 0,
+        lateMin,
+      });
+    }
+
+    while (cells.length % 7 !== 0) cells.push(null);
+    const weeks: Cell[][] = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+    return weeks;
+  };
+
+  // ── History grouping ──────────────────────────────────────────────────────
+
+  /** Sessions bucketed into pay periods, sorted newest first.
+   *  Memoised — only rebuilds when sessions, pay period, or rate changes. */
+  const payPeriodFolders = React.useMemo(() => {
+    const map: Record<string, WorkSession[]> = {};
+    workSessions.forEach(s => {
+      const k = payPeriodKey(s.date, payPeriod);
+      (map[k] = map[k] ?? []).push(s);
+    });
+    return Object.entries(map)
+      .map(([key, sessions]) => {
+        const totalHrs = sessions.reduce((a, s) => a + s.hoursWorked, 0);
+        return {
+          key,
+          label:     payPeriodLabel(key),
+          isCurrent: isCurrentPeriod(key, payPeriod),
+          sessions,
+          totalHrs,
+          totalPay:  totalHrs * hourlyRate,
+        };
+      })
+      .sort((a, b) => {
+        if (a.isCurrent && !b.isCurrent) return -1;
+        if (!a.isCurrent && b.isCurrent) return 1;
+        return b.sessions[0].clockIn.localeCompare(a.sessions[0].clockIn);
+      });
+  }, [workSessions, payPeriod, hourlyRate]);
+
+  /** Sessions within a folder, sub-grouped by calendar date. */
+  const sessionsByDate = (sessions: WorkSession[]) => {
+    const map: Record<string, WorkSession[]> = {};
+    sessions.forEach(s => { (map[s.date] = map[s.date] ?? []).push(s); });
+    return Object.entries(map).sort(([a], [b]) =>
+      parseStoredDate(b).getTime() - parseStoredDate(a).getTime()
+    );
+  };
+
+  const toggleFolder = (key: string) =>
+    setOpenFolders(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
+  // ── Profile management ────────────────────────────────────────────────────
+
+  const createProfile = () => {
+    const name = newProfileName.trim();
+    if (!name) return;
+    const p: Profile = {id: Date.now().toString(), name, createdAt: new Date().toISOString()};
+    setProfiles(prev => [...prev, p]);
+    setCurrentProfileId(p.id);
+    setShowNewProfileModal(false); setNewProfileName('');
+    setShowProfileScreen(false);
+  };
+
+  const requestDelete = (id: string) => { setProfileToDelete(id); setShowDeleteModal(true); };
+
+  const confirmDelete = async () => {
+    if (!profileToDelete) return;
+    await AsyncStorage.removeItem(profileDataKey(session.accountId, profileToDelete));
+    const updated = profiles.filter(p => p.id !== profileToDelete);
+    if (updated.length === 0) {
+      await AsyncStorage.removeItem(profilesKey(session.accountId));
+      await AsyncStorage.removeItem(currentProfileKey(session.accountId));
+    }
+    setProfiles(updated);
+    if (currentProfileId === profileToDelete) {
+      if (updated.length > 0) { setCurrentProfileId(updated[0].id); }
+      else { setCurrentProfileId(null); setShowProfileScreen(true); }
+    }
+    setShowDeleteModal(false); setProfileToDelete(null);
+  };
+
+  const cancelDelete = () => { setShowDeleteModal(false); setProfileToDelete(null); };
+
+  const clearHistory = () =>
+    Alert.alert('CLEAR HISTORY', 'Erase all work sessions for this profile?', [
+      {text: 'Cancel', style: 'cancel'},
+      {text: 'CLEAR', style: 'destructive', onPress: () => { setWorkSessions([]); setOpenFolders(new Set()); }},
+    ]);
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const activeProfile = profiles.find(p => p.id === currentProfileId);
+  const deleteTarget  = profiles.find(p => p.id === profileToDelete);
+  const {isUnfolded}  = useFoldState();
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PROFILE SELECTION SCREEN
+  // ─────────────────────────────────────────────────────────────────────────
+
+  if (showProfileScreen) {
+    return (
+      <ThemeContext.Provider value={darkMode}>
+      <SafeAreaView style={[st.safe, darkMode && st.safeDark]}>
+        <StatusBar barStyle={darkMode ? 'light-content' : 'dark-content'} backgroundColor={darkMode ? '#111317' : '#fff'} />
+        {/* RuledPaper as fixed background — outside scroll to avoid touch interference */}
+        {!darkMode && <RuledPaper />}
+        <ScrollView
+          contentContainerStyle={st.profilePageContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="always"
+          automaticallyAdjustKeyboardInsets={true}>
+
+          {/* Rainbow stripe header */}
+          <View style={st.stripeRow}>
+            {['#1a1a1a','#333','#555','#777','#999'].map((c, i) => (
+              <View key={i} style={[st.stripe, {backgroundColor: c}]} />
+            ))}
+          </View>
+
+          <View style={[st.profileCard, darkMode && st.profileCardDark]}>
+            <Text style={st.corpStamp}>═ EMPLOYEE TIME CARD SYSTEM ═</Text>
+            <Text style={[st.cardTitle, darkMode && st.textDark]}>TIMECARD</Text>
+            <Text style={[st.cardSubtitle, darkMode && st.textMutedDark]}>CLOCK IN / OUT TERMINAL</Text>
+            <View style={[st.dividerDouble, darkMode && st.dividerDark]} />
+
+            <Text style={[st.fieldLabel, darkMode && st.textDark]}>┌─ SELECT EMPLOYEE PROFILE ─┐</Text>
+
+            {profiles.length === 0
+              ? <Text style={[st.emptyMsg, darkMode && st.textMutedDark]}>[ NO EMPLOYEE PROFILES FOUND ]</Text>
+              : profiles.map((p, i) => (
+                  <TouchableOpacity
+                    key={p.id} style={[st.profileRow, darkMode && st.profileRowDark]} activeOpacity={0.75}
+                    onPress={() => { setCurrentProfileId(p.id); setShowProfileScreen(false); }}>
+                    <View style={st.badge}><Text style={st.badgeText}>{pad2(i+1)}</Text></View>
+                    <View style={st.flex1}>
+                      <Text style={[st.profileName, darkMode && st.textDark]}>{p.name.toUpperCase()}</Text>
+                      <Text style={[st.profileSince, darkMode && st.textMutedDark]}>
+                        EMP. SINCE: {new Date(p.createdAt).toLocaleDateString()}
+                      </Text>
+                    </View>
+                    <TouchableOpacity style={st.redPill}
+                      hitSlop={{top:8,bottom:8,left:8,right:8}}
+                      onPress={() => requestDelete(p.id)}>
+                      <Text style={st.redPillText}>DELETE</Text>
+                    </TouchableOpacity>
+                  </TouchableOpacity>
+                ))
+            }
+
+            <View style={[st.dividerSingle, darkMode && st.dividerSingleDark]} />
+            <TouchableOpacity style={st.addBtn} activeOpacity={0.8}
+              onPress={() => setShowNewProfileModal(true)}>
+              <Text style={st.addBtnText}>▶ ADD NEW EMPLOYEE</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+
+        <NewProfileModal
+          visible={showNewProfileModal}
+          value={newProfileName}
+          onChange={setNewProfileName}
+          onCreate={createProfile}
+          onCancel={() => { setShowNewProfileModal(false); setNewProfileName(''); }}
+        />
+        <ConfirmDeleteModal
+          visible={showDeleteModal}
+          profileName={deleteTarget?.name ?? ''}
+          onConfirm={confirmDelete}
+          onCancel={cancelDelete}
+        />
+      </SafeAreaView>
+      </ThemeContext.Provider>
+    );
+  }
+
+  // MAIN APP SCREEN
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── UNFOLDED layout — two-column sidebar + content ────────────────────────
+  if (isUnfolded) {
+    const breakReturnAt = isOnBreak
+      ? new Date(currentTime.getTime() + breakTimeLeft * 1000)
+      : null;
+
+    return (
+      <ThemeContext.Provider value={darkMode}>
+      <SafeAreaView style={[st.safe, st.unfoldedShell, darkMode && st.safeDark]}>
+        <StatusBar barStyle={darkMode ? 'light-content' : 'dark-content'} backgroundColor={darkMode ? '#111317' : '#fff'} />
+        {!darkMode && <RuledPaper />}
+
+        {/* ── LEFT SIDEBAR ── */}
+        <View style={[st.foldSidebar, darkMode && st.foldSidebarDark]}>
+          <View style={[st.foldSidebarHeader, darkMode && st.foldSidebarHeaderDark]}>
+            <View style={st.foldBrandBlock}>
+              <Text style={st.foldBrandKicker}>TIMECARD</Text>
+              <Text style={st.foldBrandTitle}>{t('WORKSTATION')}</Text>
+            </View>
+            <TouchableOpacity
+              style={st.foldProfilesBtn}
+              onPress={() => setShowProfileScreen(true)}
+              activeOpacity={0.75}>
+              <Text style={st.foldProfilesBtnText}>{t('PROFILES')}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={[st.foldEmployeeCard, darkMode && st.foldEmployeeCardDark]}>
+            <Text style={st.foldProfileEyebrow}>{t('EMPLOYEE')}</Text>
+            <Text style={st.foldEmployeeName} numberOfLines={2}>
+              {(activeProfile?.name ?? t('NO PROFILE')).toUpperCase()}
+            </Text>
+            <View style={[
+              st.foldDutyPill,
+              isClockedIn ? st.foldDutyPillOn : st.foldDutyPillOff,
+            ]}>
+              <Text style={[
+                st.foldDutyText,
+                isClockedIn ? st.foldDutyTextOn : st.foldDutyTextOff,
+              ]}>
+                {isClockedIn ? t('ON DUTY') : t('OFF DUTY')}
+              </Text>
+            </View>
+          </View>
+
+          {/* Stat column */}
+          <View style={st.foldStatCol}>
+            <View style={st.foldStatRow}>
+              <View style={st.foldStat}>
+                <Text style={st.foldStatVal}>{periodHours.toFixed(1)}</Text>
+                <Text style={st.foldStatUnit}>{t('HRS')}</Text>
+              </View>
+              <View style={st.foldStat}>
+                <Text style={st.foldStatVal}>${periodPay.toFixed(2)}</Text>
+                <Text style={st.foldStatUnit}>{t('EARNED')}</Text>
+              </View>
+            </View>
+            <Text style={st.foldStatPeriod}>{t(periodLabel())}</Text>
+          </View>
+
+          {/* Break badge */}
+          {isOnBreak && breakReturnAt && (
+            <View style={st.foldBreakBadge}>
+              <Text style={st.foldBreakBadgeTime}>⏸ {fmtBreak(breakTimeLeft)}</Text>
+              <Text style={st.foldBreakBadgeReturn}>
+                BACK {fmtTimeShort(breakReturnAt, use24h)}
+              </Text>
+            </View>
+          )}
+
+          {/* Vertical tab navigation */}
+          <View style={st.foldTabList}>
+            {TABS.map(tab => {
+              const active = activeTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[st.foldTabItem, darkMode && st.foldTabItemDark, active && st.foldTabItemActive, darkMode && active && st.foldTabItemActiveDark]}
+                  onPress={() => setActiveTab(tab.key)}
+                  activeOpacity={0.75}>
+                  <Text style={[st.foldTabGlyph, active && st.foldTabGlyphActive]}>
+                    {tab.glyph}
+                  </Text>
+                  <View style={st.flex1}>
+                    <Text style={[st.foldTabLabel, active && st.foldTabLabelActive]}>
+                      {t(tab.label)}
+                    </Text>
+                    <Text style={[st.foldTabSub, active && st.foldTabSubActive]}>
+                      {t(tab.sub)}
+                    </Text>
+                  </View>
+                  {active && <View style={st.foldTabActiveBar} />}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text style={st.foldLogoBottom}>TIMECARD</Text>
+        </View>
+
+        {/* ── RIGHT CONTENT PANEL — same ScrollView, shared renderTabContent ── */}
+        <ScrollView
+          style={[st.foldContentPanel, darkMode && st.foldContentPanelDark]}
+          contentContainerStyle={st.mainContentWide}
+          keyboardShouldPersistTaps="always"
+          showsVerticalScrollIndicator={false}
+          automaticallyAdjustKeyboardInsets={true}>
+          {renderTabContent()}
+        </ScrollView>
+
+      </SafeAreaView>
+      </ThemeContext.Provider>
+    );
+  }
+
+  const foldedLayout = (
+    <ThemeContext.Provider value={darkMode}>
+    <SafeAreaView style={[st.safe, darkMode && st.safeDark]}>
+      <StatusBar barStyle={darkMode ? 'light-content' : 'dark-content'} backgroundColor={darkMode ? '#111317' : '#fff'} />
+      {/* Fixed paper background — outside every ScrollView */}
+      {!darkMode && <RuledPaper />}
+
+      {/* ── App header ── */}
+      <View style={[st.appHeader, darkMode && st.appHeaderDark]}>
+        {/* Top row: tiny logo + profiles button */}
+        <View style={st.appHeaderTop}>
+          {/* Back / profiles button — top left */}
+          <TouchableOpacity style={st.profilesBtn}
+            onPress={() => setShowProfileScreen(true)}>
+            <Text style={st.profilesBtnText}>{t('◀ PROFILES')}</Text>
+          </TouchableOpacity>
+          <Text style={[st.appLogo, darkMode && st.textMutedDark]}>TIMECARD</Text>
+        </View>
+
+        {/* Employee name — large */}
+        {activeProfile && (
+          <Text style={[st.headerName, darkMode && st.textDark]} numberOfLines={1}>
+            {activeProfile.name.toUpperCase()}
+          </Text>
+        )}
+
+        {/* Pay-period stat bar */}
+        <View style={st.headerStatBar}>
+          <View style={st.headerStat}>
+            <Text style={st.headerStatValue}>{periodHours.toFixed(1)}</Text>
+            <Text style={st.headerStatUnit}>{t('HRS')}</Text>
+          </View>
+          <View style={st.headerStatDivider} />
+          <View style={st.headerStat}>
+            <Text style={st.headerStatValue}>${periodPay.toFixed(2)}</Text>
+            <Text style={st.headerStatUnit}>{t('EARNED')}</Text>
+          </View>
+          <View style={st.headerStatDivider} />
+          <Text style={st.headerStatPeriod}>{t(periodLabel())}</Text>
+
+          {/* Break indicator — shown in orange when on break */}
+          {isOnBreak && (() => {
+            const returnAt = new Date(currentTime.getTime() + breakTimeLeft * 1000);
+            return (
+              <>
+                <View style={st.headerStatDivider} />
+                <View style={st.headerBreakChip}>
+                  <Text style={st.headerBreakTime}>⏸ {fmtBreak(breakTimeLeft)}</Text>
+                  <Text style={st.headerBreakReturn}>
+                    BACK {fmtTimeShort(returnAt, use24h)}
+                  </Text>
+                </View>
+              </>
+            );
+          })()}
+        </View>
+      </View>
+
+      {/* ── THREE TAB CARDS ── */}
+      <View style={[st.tabCardRow, darkMode && st.tabCardRowDark]}>
+        {TABS.map(tab => {
+          const active = activeTab === tab.key;
+          return (
+            <TouchableOpacity
+              key={tab.key}
+              style={[st.tabCard, darkMode && st.tabCardDark, active && st.tabCardActive, darkMode && active && st.tabCardActiveDark]}
+              onPress={() => setActiveTab(tab.key)}
+              activeOpacity={0.75}>
+              <Text style={[st.tabCardGlyph, active && st.tabCardGlyphActive]}>
+                {tab.glyph}
+              </Text>
+              <Text style={[st.tabCardLabel, active && st.tabCardLabelActive]}>
+                {t(tab.label)}
+              </Text>
+              <Text style={[st.tabCardSub, active && st.tabCardSubActive]}>
+                {t(tab.sub)}
+              </Text>
+              {/* Active indicator — thin accent bar at the top of the card */}
+              {active && <View style={st.tabCardUnderline} />}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {/* ── Scrollable content ── */}
+      <ScrollView
+        style={[st.mainScroll, darkMode && st.mainScrollDark]}
+        contentContainerStyle={st.mainContent}
+        keyboardShouldPersistTaps="always"
+        showsVerticalScrollIndicator={false}
+        automaticallyAdjustKeyboardInsets={true}>
+        {renderTabContent()}
+      </ScrollView>
+    </SafeAreaView>
+    </ThemeContext.Provider>
+  );
+
+  // ─── renderTabContent — shared between folded and unfolded layouts ──────────
+  function renderTabContent() { return (<>
+        {/* ══ PUNCHING ══ */}
+        {activeTab === 'punching' && (
+          <>
+            {/* Current time */}
+            <Card>
+              <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>{t('══════ CURRENT TIME ══════')}</Text>
+              <Text style={[st.bigClock, darkMode && st.textDark]}>{fmtTimeLong(currentTime, use24h)}</Text>
+              <Text style={[st.dateText, darkMode && st.textMutedDark]}>
+                {currentTime.toLocaleDateString('en-US', {
+                  weekday:'long', month:'long', day:'numeric', year:'numeric',
+                }).toUpperCase()}
+              </Text>
+            </Card>
+
+            {/* Clock in / out */}
+            <Card>
+              {!isClockedIn ? (
+                <>
+                  <View style={[st.statusOff, darkMode && st.statusOffDark]}>
+                    <Text style={[st.statusOffLabel, darkMode && st.textMutedDark]}>{t('STATUS: NOT CLOCKED IN')}</Text>
+                    <Text style={st.offDutyText}>{t('▬▬ OFF DUTY ▬▬')}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={st.punchInBtn}
+                    onPress={handleClockIn}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Punch in — start recording work time">
+                    <Text style={st.punchLabel}>{t('▶▶▶ PUNCH IN ◀◀◀')}</Text>
+                  </TouchableOpacity>
+                  {scanEnabled && (
+                    <ScanToPunch
+                      embedded
+                      onConfirm={applyScannedPunches}
+                      onCancel={() => undefined}
+                      use24h={use24h}
+                      darkMode={darkMode}
+                    />
+                  )}
+                </>
+              ) : (
+                <>
+                  <View style={[st.statusOn, darkMode && st.statusOnDark]}>
+                    <Text style={[st.statusOnLabel, darkMode && st.statusOnLabelDark]}>{t('═══ STATUS: ON DUTY ═══')}</Text>
+                    <Text style={[st.clockedAtCaption, darkMode && st.textMutedDark]}>{t('CLOCKED IN AT:')}</Text>
+                    <Text style={[st.clockedAtTime, darkMode && st.textDark]}>
+                      {clockInTime ? fmtTimeShort(clockInTime, use24h) : ''}
+                    </Text>
+                    <View style={[st.shiftChip, darkMode && st.shiftChipDark]}>
+                      <Text style={[st.shiftCaption, darkMode && st.textMutedDark]}>{t('HOURS: ')}</Text>
+                      <Text style={[st.shiftValue, darkMode && st.textDark]}>{shiftHours().toFixed(2)}</Text>
+                    </View>
+                    {/* Break type indicator */}
+                    <View style={[st.breakTypePill,
+                      paidBreaks ? st.breakTypePillPaid : st.breakTypePillUnpaid]}>
+                      <Text style={st.breakTypePillText}>
+                        {paidBreaks ? t('✓ PAID BREAKS') : t('✕ UNPAID BREAKS')}
+                      </Text>
+                    </View>
+                    {/* Late warning */}
+                    {lateMinutes() !== null && (
+                      <View style={st.lateChip}>
+                        <Text style={st.lateText}>
+                          ⚠ {t('LATE BY')} {lateMinutes()} {t('MIN')}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {!isOnBreak ? (
+                    <View style={st.breakSection}>
+                      <Text style={[st.breakCaption, darkMode && st.textMutedDark]}>{t('┌─ SELECT BREAK DURATION ─┐')}</Text>
+                      <View style={st.breakRow}>
+                        {[15, 30, 60].map(m => (
+                          <TouchableOpacity key={m} style={[st.breakChip, darkMode && st.breakChipDark]}
+                            onPress={() => startBreak(m)} activeOpacity={0.7}>
+                            <Text style={[st.breakChipLabel, darkMode && st.textDark]}>
+                              {m === 60 ? t('1 HOUR') : `${m} ${t('MIN')}`}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={[st.onBreakBox, darkMode && st.onBreakBoxDark]}>
+                      <Text style={[st.onBreakCaption, darkMode && st.onBreakInkDark]}>
+                        {paidBreaks ? t('☕ ON BREAK — PAID (STILL EARNING)') : t('⏸ ON BREAK — CLOCK PAUSED')}
+                      </Text>
+                      <Text style={st.breakCountdown}>
+                        {breakTimeLeft > 0 ? fmtBreak(breakTimeLeft) : t("TIME'S UP")}
+                      </Text>
+                      {breakTimeLeft > 0 ? (
+                        /* Predicted return-to-work time */
+                        <View style={st.breakReturnRow}>
+                          <Text style={[st.breakReturnLabel, darkMode && st.onBreakInkDark]}>{t('RETURN AT')}</Text>
+                          <Text style={st.breakReturnTime}>
+                            {fmtTimeShort(
+                              new Date(currentTime.getTime() + breakTimeLeft * 1000),
+                              use24h
+                            )}
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={st.breakOverNote}>{t("CLOCK BACK IN WHENEVER YOU'RE READY")}</Text>
+                      )}
+                      <TouchableOpacity
+                        style={st.clockBackInBtn}
+                        onPress={endBreak}
+                        activeOpacity={0.85}
+                        accessibilityRole="button"
+                        accessibilityLabel="Clock back in — end break and resume work">
+                        <Text style={st.clockBackInLabel}>{t('▶▶  CLOCK BACK IN  ◀◀')}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    style={st.punchOutBtn}
+                    onPress={handleClockOut}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Punch out — stop recording and save session">
+                    <Text style={st.punchLabel}>{t('▶▶▶ PUNCH OUT ◀◀◀')}</Text>
+                  </TouchableOpacity>
+                  {scanEnabled && (
+                    <ScanToPunch
+                      embedded
+                      onConfirm={applyScannedPunches}
+                      onCancel={() => undefined}
+                      use24h={use24h}
+                      darkMode={darkMode}
+                    />
+                  )}
+                </>
+              )}
+            </Card>
+
+            {/* Earnings */}
+            <Card>
+              <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>{t('═══ EARNINGS SUMMARY ═══')}</Text>
+              <View style={st.earningsRow}>
+                <View style={[st.earningsTwo, st.earningsTwoToday, darkMode && st.earningsTwoDark]}>
+                  <Text style={[st.earningsTwoCaption, darkMode && st.textMutedDark]}>{t("TODAY'S EARNINGS")}</Text>
+                  <Text style={[st.earningsTwoAmt, darkMode && st.amtGreenDark]}>${todayPay().toFixed(2)}</Text>
+                  <Text style={[st.earningsTwoNet, darkMode && st.textMutedDark]}>{t('NET')} ${netOf(todayPay()).toFixed(2)}</Text>
+                </View>
+                <View style={[st.earningsTwo, st.earningsTwoWeek, darkMode && st.earningsTwoDark]}>
+                  <Text style={[st.earningsTwoCaption, darkMode && st.textMutedDark]}>{t("THIS WEEK'S EARNINGS")}</Text>
+                  <Text style={[st.earningsTwoAmt, st.earningsTwoAmtBlue, darkMode && st.amtBlueDark]}>${weekPay().toFixed(2)}</Text>
+                  <Text style={[st.earningsTwoNet, darkMode && st.textMutedDark]}>{t('NET')} ${netOf(weekPay()).toFixed(2)}</Text>
+                </View>
+              </View>
+              <ERow label={t('HOURS WORKED')}   value={todayHours().toFixed(2)} />
+              <ERow label={t('WEEK HOURS')}     value={weekHours().toFixed(2)} />
+              <ERow label={t('HOURLY RATE')}    value={`$${hourlyRate.toFixed(2)}/hr`} />
+              <ERow label={t('EST. TAX RATE')}  value={`${(taxBreakdown().total * 100).toFixed(1)}%  (${taxState})`} />
+              <ERow label={t('PAY SCHEDULE')}   value={nextPayday()} small />
+
+              {/* Disclaimer */}
+              <View style={st.disclaimer}>
+                <Text style={st.disclaimerIcon}>⚠</Text>
+                <Text style={st.disclaimerText}>
+                  {t("This is a rough time-tracking tool. Figures shown are estimates only and may not reflect 100% of your hours worked or your exact pay. Always verify earnings with your employer's official payroll records.")}
+                </Text>
+              </View>
+            </Card>
+          </>
+        )}
+
+        {/* ══ HISTORY ══ */}
+        {activeTab === 'history' && (
+          <Card>
+            <View style={st.historyTop}>
+              <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>═══ WORK HISTORY ═══</Text>
+              {workSessions.length > 0 && (
+                <TouchableOpacity style={st.redPill} onPress={clearHistory}>
+                  <Text style={st.redPillText}>CLEAR</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {workSessions.length === 0
+              ? <Text style={[st.emptyMsg, darkMode && st.textMutedDark]}>[ NO WORK HISTORY RECORDED ]</Text>
+              : payPeriodFolders.map(folder => {
+                  const open = openFolders.has(folder.key);
+                  return (
+                    <View key={folder.key} style={st.folder}>
+                      {/* ── Folder header (tap to expand/collapse) ── */}
+                      <TouchableOpacity
+                        style={[st.folderHeader, folder.isCurrent && st.folderHeaderCurrent]}
+                        onPress={() => toggleFolder(folder.key)}
+                        activeOpacity={0.75}>
+                        <View style={st.flex1}>
+                          {folder.isCurrent && (
+                            <Text style={st.currentPeriodBadge}>
+                              ● CURRENT PAY PERIOD
+                            </Text>
+                          )}
+                          <Text style={st.folderLabel}>{folder.label}</Text>
+                          <Text style={st.folderTotals}>
+                            {folder.totalHrs.toFixed(2)} HRS  ·  ${folder.totalPay.toFixed(2)}
+                          </Text>
+                        </View>
+                        {/* Folder tab arrow */}
+                        <View style={st.folderTabArrow}>
+                          <Text style={st.folderArrowText}>{open ? '▼' : '▶'}</Text>
+                        </View>
+                      </TouchableOpacity>
+
+                      {/* ── Folder contents ── */}
+                      {open && (
+                        <View style={[st.folderBody, darkMode && st.folderBodyDark]}>
+                          {sessionsByDate(folder.sessions).map(([date, sessions]) => {
+                            const dayHrs = sessions.reduce((a,s) => a + s.hoursWorked, 0);
+                            return (
+                              <View key={date} style={[st.dayGroup, darkMode && st.dayGroupDark]}>
+                                <View style={[st.dayHeader, darkMode && st.dayHeaderDark]}>
+                                  <Text style={[st.dayDate, darkMode && st.textDark]}>{displayDate(date).toUpperCase()}</Text>
+                                  <Text style={[st.dayTotal, darkMode && st.dayTotalDark]}>
+                                    {dayHrs.toFixed(2)} HRS  ·  ${(dayHrs * hourlyRate).toFixed(2)}
+                                  </Text>
+                                </View>
+                                {sessions.map((sess, i) => {
+                                  const totalBreakSec = sess.breaks?.reduce((a,b) => a + b.durationSec, 0) ?? 0;
+                                  const unpaidBreakSec = sess.breaks?.filter(b => !b.paid).reduce((a,b) => a + b.durationSec, 0) ?? 0;
+                                  return (
+                                    <View key={i} style={[st.sessionRow, darkMode && st.sessionRowDark]}>
+                                      {/* Clock in / out times */}
+                                      <View style={st.sessionTimes}>
+                                        <Text style={[st.sessionTime, darkMode && st.textMutedDark]}>
+                                          IN:  {fmtTimeShort(new Date(sess.clockIn), use24h)}
+                                        </Text>
+                                        <Text style={[st.sessionTime, darkMode && st.textMutedDark]}>
+                                          OUT: {fmtTimeShort(new Date(sess.clockOut), use24h)}
+                                        </Text>
+                                      </View>
+
+                                      {/* Hours worked + earnings */}
+                                      <Text style={[st.sessionEarnings, darkMode && st.sessionEarningsDark]}>
+                                        {sess.hoursWorked.toFixed(2)} HRS  ·  ${(sess.hoursWorked * hourlyRate).toFixed(2)}
+                                      </Text>
+
+                                      {/* Break breakdown (only when breaks were taken) */}
+                                      {sess.breaks && sess.breaks.length > 0 && (
+                                        <View style={[st.sessionBreaksBox, darkMode && st.sessionBreaksBoxDark]}>
+                                          {sess.breaks.map((brk, bi) => {
+                                            const mins = Math.round(brk.durationSec / 60);
+                                            return (
+                                              <View key={bi} style={st.sessionBreakRow}>
+                                                <View style={[st.sessionBreakBadge,
+                                                  brk.paid ? st.sessionBreakBadgePaid : st.sessionBreakBadgeUnpaid]}>
+                                                  <Text style={st.sessionBreakBadgeText}>
+                                                    {brk.paid ? 'PAID' : 'UNPAID'}
+                                                  </Text>
+                                                </View>
+                                                <Text style={[st.sessionBreakDetail, darkMode && st.textMutedDark]}>
+                                                  BREAK  {fmtTimeShort(new Date(brk.startTime), use24h)}  ·  {mins < 1 ? '<1' : mins} min
+                                                </Text>
+                                              </View>
+                                            );
+                                          })}
+                                          {/* Summary if there are unpaid breaks */}
+                                          {unpaidBreakSec > 0 && (
+                                            <Text style={st.sessionBreakSummary}>
+                                              −{Math.round(unpaidBreakSec / 60)} min unpaid deducted
+                                            </Text>
+                                          )}
+                                          {unpaidBreakSec === 0 && totalBreakSec > 0 && (
+                                            <Text style={[st.sessionBreakSummary, st.sessionBreakSummaryPaid]}>
+                                              {Math.round(totalBreakSec / 60)} min break · paid
+                                            </Text>
+                                          )}
+                                        </View>
+                                      )}
+                                    </View>
+                                  );
+                                })}
+                              </View>
+                            );
+                          })}
+                        </View>
+                      )}
+                    </View>
+                  );
+                })
+            }
+          </Card>
+        )}
+
+        {/* ══ SCHEDULE ══ */}
+        {activeTab === 'schedule' && (
+          <>
+            {/* ── Monthly calendar ── */}
+            <Card>
+              <View style={st.calNavRow}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); }
+                    else setCalMonth(m => m - 1);
+                  }}
+                  style={[st.calNavBtn, darkMode && st.calNavBtnDark]}>
+                  <Text style={[st.calNavBtnText, darkMode && st.textDark]}>◀</Text>
+                </TouchableOpacity>
+                <Text style={[st.calTitle, darkMode && st.textDark]}>
+                  {MONTH_NAMES[calMonth].toUpperCase()}  {calYear}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); }
+                    else setCalMonth(m => m + 1);
+                  }}
+                  style={[st.calNavBtn, darkMode && st.calNavBtnDark]}>
+                  <Text style={[st.calNavBtnText, darkMode && st.textDark]}>▶</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Active pod banner for pod mode */}
+              {schedCfg.mode === 'pod' && schedCfg.pods.length > 0 && (() => {
+                const pod = getActivePodForDate(new Date());
+                const next = nextRotationLabel();
+                return pod ? (
+                  <View style={st.activePodBanner}>
+                    <Text style={st.activePodBannerText}>
+                      ● {pod.name.toUpperCase()} ACTIVE
+                      {'  '}·{'  '}
+                      {pod.days.map(d => SCHED_SHORT[SCHED_DAYS.indexOf(d)]).join(' ')}
+                    </Text>
+                    {next ? <Text style={st.activePodBannerSub}>rotates {next}</Text> : null}
+                  </View>
+                ) : null;
+              })()}
+
+              <View style={st.calRow}>
+                {SCHED_SHORT.map(d => (
+                  <Text key={d} style={[st.calDayHeader, darkMode && st.textMutedDark]}>{d}</Text>
+                ))}
+              </View>
+
+              {buildCalendar().map((week, wi) => (
+                <View key={wi} style={st.calRow}>
+                  {week.map((cell, ci) => {
+                    if (!cell) return <View key={ci} style={st.calCell} />;
+                    const dotColor = !cell.hasPunch
+                      ? 'transparent'
+                      : cell.lateMin !== null ? '#c62828' : '#2e7d32';
+                    return (
+                      <View key={ci} style={[
+                        st.calCell,
+                        cell.isToday && st.calCellToday, cell.isToday && darkMode && st.calCellTodayDark,
+                        !cell.isScheduled && st.calCellOff,
+                      ]}>
+                        <Text style={[
+                          st.calDayNum, darkMode && st.textDark,
+                          cell.isToday && st.calDayNumToday,
+                          !cell.isScheduled && st.calDayNumOff,
+                        ]}>
+                          {cell.date}
+                        </Text>
+                        <View style={[st.calDot, {backgroundColor: dotColor}]} />
+                      </View>
+                    );
+                  })}
+                </View>
+              ))}
+
+              <View style={[st.calLegend, darkMode && st.calLegendDark]}>
+                {[['#2e7d32','ON TIME'],['#c62828','LATE'],['#ccc','NO PUNCH']].map(([c,l]) => (
+                  <View key={l} style={st.calLegendItem}>
+                    <View style={[st.calDot, {backgroundColor:c}]} />
+                    <Text style={st.calLegendText}>{l}</Text>
+                  </View>
+                ))}
+              </View>
+            </Card>
+
+            {/* ── Schedule type toggle ── */}
+            <Card>
+              <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>═══ SCHEDULE TYPE ═══</Text>
+              <View style={st.schedTypeRow}>
+                {([
+                  ['static', 'FIXED WEEK'],
+                  ['pod',    'ROTATING'],
+                  ['flex',   'WEEKLY FLEX'],
+                ] as const).map(([mode, label]) => (
+                  <TouchableOpacity
+                    key={mode}
+                    style={[st.schedTypeBtn, darkMode && st.schedTypeBtnDark, schedCfg.mode === mode && st.schedTypeBtnActive, schedCfg.mode === mode && darkMode && st.schedTypeBtnActiveDark]}
+                    onPress={() => setSchedCfg(prev => ({...prev, mode}))}>
+                    <Text style={[st.schedTypeBtnText, schedCfg.mode === mode && st.schedTypeBtnTextActive]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* ── STATIC: week editor ── */}
+              {schedCfg.mode === 'static' && (
+                <>
+                  <Text style={st.calHint}>
+                    Tap a day to toggle on/off. Tap time segments to adjust.
+                  </Text>
+                  {SCHED_DAYS.map((key, i) => {
+                    const day = schedCfg.weekSchedule[key];
+                    return (
+                      <View key={key} style={[st.schedRow, darkMode && st.schedRowDark, !day.enabled && st.schedRowOff]}>
+                        <TouchableOpacity
+                          style={st.schedDayBtn}
+                          onPress={() => updateDaySchedule(key, {enabled: !day.enabled})}>
+                          <View style={[st.schedToggle, darkMode && st.schedToggleDark, day.enabled && st.schedToggleOn, day.enabled && darkMode && st.schedToggleOnDark]} />
+                          <Text style={[st.schedDayLabel, day.enabled && st.schedDayLabelOn, day.enabled && darkMode && st.textDark]}>
+                            {SCHED_SHORT[i]}
+                          </Text>
+                        </TouchableOpacity>
+                        {day.enabled ? (
+                          <View style={st.schedTimes}>
+                            <TimeField hour={day.startHour} min={day.startMin}
+                              onChange={(h,m) => updateDaySchedule(key,{startHour:h,startMin:m})} />
+                            <Text style={st.schedDash}>–</Text>
+                            <TimeField hour={day.endHour} min={day.endMin}
+                              onChange={(h,m) => updateDaySchedule(key,{endHour:h,endMin:m})} />
+                          </View>
+                        ) : (
+                          <Text style={st.schedOffLabel}>OFF</Text>
+                        )}
+                      </View>
+                    );
+                  })}
+                </>
+              )}
+
+              {/* ── POD / ROTATING ── */}
+              {schedCfg.mode === 'pod' && (
+                <>
+                  {/* Rotation period */}
+                  <Text style={[st.fieldLabel, st.marginTop14]}>ROTATION PERIOD:</Text>
+                  <View style={st.rotPeriodRow}>
+                    {([
+                      ['biweekly',  'BI-WEEKLY'],
+                      ['monthly',   'MONTHLY'],
+                      ['bimonthly', 'BI-MONTHLY'],
+                    ] as const).map(([val, label]) => (
+                      <TouchableOpacity
+                        key={val}
+                        style={[st.rotPeriodBtn, darkMode && st.rotPeriodBtnDark, schedCfg.rotationPeriod === val && st.rotPeriodBtnActive, schedCfg.rotationPeriod === val && darkMode && st.rotPeriodBtnActiveDark]}
+                        onPress={() => setSchedCfg(prev => ({...prev, rotationPeriod: val}))}>
+                        <Text style={[st.rotPeriodBtnText, schedCfg.rotationPeriod === val && st.rotPeriodBtnTextActive]}>
+                          {label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* Rotation start date */}
+                  <Text style={[st.fieldLabel, st.marginTop12]}>ROTATION STARTED:</Text>
+                  <Text style={st.calHint}>
+                    The date your first pod began. Used to calculate which pod is active.
+                  </Text>
+                  <TextInput
+                    style={[st.input, darkMode && st.inputDark, darkMode && st.textDark]}
+                    value={schedCfg.rotationStartDate}
+                    onChangeText={v => setSchedCfg(prev => ({...prev, rotationStartDate: v}))}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor="#bbb"
+                    keyboardType="numbers-and-punctuation"
+                    returnKeyType="done"
+                  />
+
+                  {/* Pod list */}
+                  <Text style={[st.fieldLabel, st.marginTop16]}>PODS:</Text>
+                  <Text style={st.calHint}>
+                    Each pod has its own working days and hours.
+                    The first pod is active from your start date; they rotate on your chosen period.
+                  </Text>
+
+                  {schedCfg.pods.map(pod => {
+                    const isActive = getActivePodForDate(new Date())?.id === pod.id;
+                    return (
+                      <View key={pod.id} style={[st.podCard, darkMode && st.podCardDark, isActive && st.podCardActive, isActive && darkMode && st.podCardActiveDark]}>
+                        {/* Pod header */}
+                        <View style={st.podHeader}>
+                          <TextInput
+                            style={[st.podNameInput, darkMode && st.podNameInputDark, darkMode && st.textDark]}
+                            value={pod.name}
+                            onChangeText={v => updatePod(pod.id, {name: v})}
+                            placeholder="Pod name"
+                            placeholderTextColor="#bbb"
+                          />
+                          {isActive && (
+                            <View style={st.podActiveBadge}>
+                              <Text style={st.podActiveBadgeText}>● ACTIVE</Text>
+                            </View>
+                          )}
+                          {schedCfg.pods.length > 1 && (
+                            <TouchableOpacity onPress={() => removePod(pod.id)} style={st.podDeleteBtn}>
+                              <Text style={st.podDeleteBtnText}>✕</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+
+                        {/* Day checkboxes */}
+                        <View style={st.podDayRow}>
+                          {SCHED_DAYS.map((day, di) => {
+                            const active = pod.days.includes(day);
+                            return (
+                              <TouchableOpacity
+                                key={day}
+                                style={[st.podDayChip, darkMode && st.podDayChipDark, active && st.podDayChipActive, active && darkMode && st.podDayChipActiveDark]}
+                                onPress={() => togglePodDay(pod.id, day)}>
+                                <Text style={[st.podDayChipText, active && st.podDayChipTextActive]}>
+                                  {SCHED_SHORT[di].slice(0,2)}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+
+                        {/* Times */}
+                        <View style={st.schedTimes}>
+                          <Text style={st.schedOffLabel}>HOURS  </Text>
+                          <TimeField hour={pod.startHour} min={pod.startMin}
+                            onChange={(h,m) => updatePod(pod.id,{startHour:h,startMin:m})} />
+                          <Text style={st.schedDash}>–</Text>
+                          <TimeField hour={pod.endHour} min={pod.endMin}
+                            onChange={(h,m) => updatePod(pod.id,{endHour:h,endMin:m})} />
+                        </View>
+                      </View>
+                    );
+                  })}
+
+                  <TouchableOpacity style={[st.addPodBtn, darkMode && st.addPodBtnDark]} onPress={addPod}>
+                    <Text style={[st.addPodBtnText, darkMode && st.textMutedDark]}>+ ADD POD</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
+              {/* ── FLEX: week-by-week entry ── */}
+              {schedCfg.mode === 'flex' && (() => {
+                // Build the 7 dates for the currently viewed week
+                const days = Array.from({length: 7}, (_, i) => {
+                  const d = new Date(flexWeekStart);
+                  d.setDate(flexWeekStart.getDate() + i);
+                  return d;
+                });
+                const prevWeek = () => {
+                  const d = new Date(flexWeekStart);
+                  d.setDate(d.getDate() - 7);
+                  setFlexWeekStart(d);
+                };
+                const nextWeek = () => {
+                  const d = new Date(flexWeekStart);
+                  d.setDate(d.getDate() + 7);
+                  setFlexWeekStart(d);
+                };
+                const weekEnd = days[6];
+                const todayKey = toDateKey(new Date());
+
+                return (
+                  <>
+                    <Text style={st.calHint}>
+                      Enter your schedule each week as you receive it.
+                      Days left blank are treated as days off.
+                    </Text>
+
+                    {/* Week navigation */}
+                    <View style={st.flexWeekNav}>
+                      <TouchableOpacity onPress={prevWeek} style={[st.calNavBtn, darkMode && st.calNavBtnDark]}>
+                        <Text style={[st.calNavBtnText, darkMode && st.textDark]}>◀</Text>
+                      </TouchableOpacity>
+                      <Text style={[st.flexWeekLabel, darkMode && st.textDark]}>
+                        {flexWeekStart.toLocaleDateString('en-US',{month:'short',day:'numeric'})}
+                        {' – '}
+                        {weekEnd.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}
+                      </Text>
+                      <TouchableOpacity onPress={nextWeek} style={[st.calNavBtn, darkMode && st.calNavBtnDark]}>
+                        <Text style={[st.calNavBtnText, darkMode && st.textDark]}>▶</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Jump to current week */}
+                    <TouchableOpacity
+                      style={st.flexJumpBtn}
+                      onPress={() => setFlexWeekStart(weekMonday(new Date()))}>
+                      <Text style={st.flexJumpBtnText}>JUMP TO THIS WEEK</Text>
+                    </TouchableOpacity>
+
+                    {/* Day rows */}
+                    {days.map(date => {
+                      const key   = toDateKey(date);
+                      const entry = (schedCfg.flexSchedule ?? {})[key];
+                      const isOn  = entry?.working === true;
+                      const isToday = key === todayKey;
+                      const dayName = SCHED_SHORT[date.getDay()];
+                      const dayNum  = date.getDate();
+
+                      return (
+                        <View key={key} style={[st.flexDayRow, isToday && st.flexDayRowToday, darkMode && st.flexDayRowTodayDark]}>
+                          {/* Toggle + day label */}
+                          <TouchableOpacity
+                            style={st.schedDayBtn}
+                            onPress={() => updateFlexDay(date, {working: !isOn})}>
+                            <View style={[st.schedToggle, isOn && st.schedToggleOn]} />
+                            <View>
+                              <Text style={[st.schedDayLabel, isOn && st.schedDayLabelOn]}>
+                                {dayName}
+                              </Text>
+                              <Text style={st.flexDayDate}>{dayNum}</Text>
+                            </View>
+                          </TouchableOpacity>
+
+                          {/* Hours */}
+                          {isOn && entry ? (
+                            <View style={st.schedTimes}>
+                              <TimeField
+                                hour={entry.startHour} min={entry.startMin}
+                                onChange={(h,m) => updateFlexDay(date,{startHour:h,startMin:m})}
+                              />
+                              <Text style={st.schedDash}>–</Text>
+                              <TimeField
+                                hour={entry.endHour} min={entry.endMin}
+                                onChange={(h,m) => updateFlexDay(date,{endHour:h,endMin:m})}
+                              />
+                            </View>
+                          ) : (
+                            <Text style={st.schedOffLabel}>OFF</Text>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </>
+                );
+              })()}
+            </Card>
+          </>
+        )}
+
+        {/* ══ SETTINGS ══ */}
+        {activeTab === 'settings' && (
+          <Card>
+            <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>{t('▼ CONFIGURATION SETTINGS')}</Text>
+
+            {/* ── Account ── */}
+            <AccountSection
+              session={session}
+              onSignOut={onSignOut}
+              t={t}
+            />
+
+            <View style={st.dividerSingle} />
+
+            {/* ── Dark mode ── */}
+            <TouchableOpacity
+              style={[st.scanToggleRow, darkMode && st.scanToggleRowDark]}
+              onPress={() => setDarkMode(v => !v)}
+              activeOpacity={0.7}
+              accessibilityRole="switch"
+              accessibilityState={{checked: darkMode}}>
+              <View style={st.flex1}>
+                <Text style={[st.scanToggleLabel, darkMode && st.textDark]}>
+                  {darkMode ? t('DARK MODE') : t('LIGHT MODE')}
+                </Text>
+                <Text style={[st.scanToggleDesc, darkMode && st.textMutedDark]}>
+                  {darkMode
+                    ? t('Uses a darker workspace with brighter text for low-light use.')
+                    : t('Uses the classic paper workspace.')}
+                </Text>
+              </View>
+              <View style={[st.scanTogglePill, darkMode && st.scanTogglePillOn]}>
+                <View style={[st.scanToggleThumb, darkMode && st.scanToggleThumbOn]} />
+              </View>
+            </TouchableOpacity>
+
+            <View style={[st.dividerSingle, darkMode && st.dividerSingleDark]} />
+
+            {/* ── Scan to Punch toggle ── */}
+            <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>{t('═══ SCAN TO PUNCH ═══')}</Text>
+            <TouchableOpacity
+              style={[st.scanToggleRow, darkMode && st.scanToggleRowDark]}
+              onPress={() => setScanEnabled(v => !v)}
+              activeOpacity={0.7}
+              accessibilityRole="switch"
+              accessibilityState={{checked: scanEnabled}}>
+              <View style={st.flex1}>
+                <Text style={[st.scanToggleLabel, darkMode && st.textDark]}>{t('SCAN TO PUNCH')}</Text>
+                <Text style={[st.scanToggleDesc, darkMode && st.textMutedDark]}>
+                  {t('Use your device camera to photograph a company punch clock or paper timecard. The app reads the times via on-device OCR and lets you confirm before applying — works for punch-ins, punch-outs, and breaks (15 min / 30 min / 1 hour).')}
+                </Text>
+              </View>
+              <View style={[st.scanTogglePill, scanEnabled && st.scanTogglePillOn]}>
+                <View style={[st.scanToggleThumb, scanEnabled && st.scanToggleThumbOn]} />
+              </View>
+            </TouchableOpacity>
+
+            <View style={[st.dividerSingle, darkMode && st.dividerSingleDark]} />
+
+            <Text style={[st.fieldLabel, darkMode && st.textDark]}>{t('HOURLY RATE ($):')}</Text>
+            <TextInput
+              style={[st.input, darkMode && st.inputDark]}
+              value={hourlyRateInput}
+              onChangeText={val => {
+                setHourlyRateInput(val);
+                const n = parseFloat(val);
+                if (!isNaN(n) && n >= 0) setHourlyRate(n);
+              }}
+              keyboardType="decimal-pad"
+              returnKeyType="done"
+              placeholderTextColor={darkMode ? '#707782' : '#aaa'}
+            />
+
+            {/* ── Paid / Unpaid breaks ── */}
+            <TouchableOpacity
+              style={[st.scanToggleRow, darkMode && st.scanToggleRowDark]}
+              onPress={() => setPaidBreaks(v => !v)}
+              activeOpacity={0.7}
+              accessibilityRole="switch">
+              <View style={st.flex1}>
+                <Text style={[st.scanToggleLabel, darkMode && st.textDark]}>
+                  {paidBreaks ? t('PAID BREAKS') : t('UNPAID BREAKS')}
+                </Text>
+                <Text style={[st.scanToggleDesc, darkMode && st.textMutedDark]}>
+                  {paidBreaks
+                    ? t('Break time counts toward your total hours and pay.')
+                    : t('Break time is deducted from your total hours and pay.')}
+                </Text>
+              </View>
+              <View style={[st.scanTogglePill, paidBreaks && st.scanTogglePillOn]}>
+                <View style={[st.scanToggleThumb, paidBreaks && st.scanToggleThumbOn]} />
+              </View>
+            </TouchableOpacity>
+
+            {/* ── 24-hour clock ── */}
+            <TouchableOpacity
+              style={[st.scanToggleRow, darkMode && st.scanToggleRowDark]}
+              onPress={() => setUse24h(v => !v)}
+              activeOpacity={0.7}
+              accessibilityRole="switch">
+              <View style={st.flex1}>
+                <Text style={[st.scanToggleLabel, darkMode && st.textDark]}>
+                  {use24h ? t('24-HOUR TIME') : t('12-HOUR TIME (AM/PM)')}
+                </Text>
+                <Text style={[st.scanToggleDesc, darkMode && st.textMutedDark]}>
+                  {use24h
+                    ? t('Times shown in 24-hour format — e.g. 14:30 instead of 2:30 PM.')
+                    : t('Times shown with AM / PM — e.g. 2:30 PM instead of 14:30.')}
+                </Text>
+              </View>
+              <View style={[st.scanTogglePill, use24h && st.scanTogglePillOn]}>
+                <View style={[st.scanToggleThumb, use24h && st.scanToggleThumbOn]} />
+              </View>
+            </TouchableOpacity>
+
+            {/* ── Language ── */}
+            <Text style={[st.fieldLabel, st.marginTop18, darkMode && st.textDark]}>{t('LANGUAGE:')}</Text>
+            {([['en', 'ENGLISH'], ['es', 'SPANISH / ESPAÑOL']] as [Lang, string][]).map(([val, label]) => (
+              <TouchableOpacity key={val}
+                style={[st.radioRow, darkMode && st.radioRowDark, lang === val && st.radioRowActive, darkMode && lang === val && st.radioRowActiveDark]}
+                onPress={() => setLang(val)}
+                accessibilityRole="radio">
+                <View style={[st.radioCircle, lang === val && st.radioFilled]} />
+                <Text style={[st.radioLabel, darkMode && st.textMutedDark, lang === val && st.radioLabelActive, darkMode && lang === val && st.textDark]}>
+                  {t(label)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+
+            <Text style={[st.fieldLabel, st.marginTop18, darkMode && st.textDark]}>{t('PAY PERIOD SCHEDULE:')}</Text>
+            {[
+              ['weekly',     'WEEKLY'],
+              ['bi-weekly',  'BI-WEEKLY'],
+              ['bi-monthly', 'SEMI-MONTHLY  (15TH & EOM)'],
+              ['monthly',    'MONTHLY'],
+              ['yearly',     'YEARLY'],
+            ].map(([val, label]) => (
+              <TouchableOpacity key={val}
+                style={[st.radioRow, darkMode && st.radioRowDark, payPeriod === val && st.radioRowActive, darkMode && payPeriod === val && st.radioRowActiveDark]}
+                onPress={() => setPayPeriod(val)}>
+                <View style={[st.radioCircle, payPeriod === val && st.radioFilled]} />
+                <Text style={[st.radioLabel, darkMode && st.textMutedDark, payPeriod === val && st.radioLabelActive, darkMode && payPeriod === val && st.textDark]}>
+                  {t(label)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+
+            {/* ── Tax location ── */}
+            <Text style={[st.fieldLabel, st.marginTop18, darkMode && st.textDark]}>{t('TAX LOCATION:')}</Text>
+
+            <TouchableOpacity
+              style={[st.dropdownButton, darkMode && st.dropdownButtonDark]}
+              onPress={() => {
+                setCountryMenuOpen(v => !v);
+                setRegionMenuOpen(false);
+              }}
+              activeOpacity={0.75}
+              accessibilityRole="button">
+              <View>
+                <Text style={[st.dropdownKicker, darkMode && st.textMutedDark]}>{t('COUNTRY')}</Text>
+                <Text style={[st.dropdownValue, darkMode && st.textDark]}>{COUNTRY_NAMES[taxCountry]}</Text>
+              </View>
+              <Text style={[st.dropdownArrow, darkMode && st.textDark]}>{countryMenuOpen ? '▲' : '▼'}</Text>
+            </TouchableOpacity>
+            {countryMenuOpen && (
+              <View style={[st.dropdownMenu, darkMode && st.dropdownMenuDark]}>
+                {(['US', 'CA'] as TaxCountry[]).map(country => (
+                  <TouchableOpacity
+                    key={country}
+                    style={[st.dropdownOption, darkMode && st.dropdownOptionDark, taxCountry === country && st.dropdownOptionActive]}
+                    onPress={() => selectTaxCountry(country)}
+                    activeOpacity={0.7}>
+                    <Text style={[st.dropdownOptionText, darkMode && st.textMutedDark, taxCountry === country && st.dropdownOptionTextActive]}>
+                      {COUNTRY_NAMES[country]}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            <TouchableOpacity
+              style={[st.dropdownButton, darkMode && st.dropdownButtonDark]}
+              onPress={() => {
+                setRegionMenuOpen(v => !v);
+                setCountryMenuOpen(false);
+              }}
+              activeOpacity={0.75}
+              accessibilityRole="button">
+              <View style={st.flex1}>
+                <Text style={[st.dropdownKicker, darkMode && st.textMutedDark]}>
+                  {taxCountry === 'US' ? t('STATE / DISTRICT') : t('PROVINCE / TERRITORY')}
+                </Text>
+                <Text style={[st.dropdownValue, darkMode && st.textDark]}>
+                  {selectedTaxRegion.name} ({selectedTaxRegion.code})
+                </Text>
+              </View>
+              <Text style={[st.dropdownArrow, darkMode && st.textDark]}>{regionMenuOpen ? '▲' : '▼'}</Text>
+            </TouchableOpacity>
+            {regionMenuOpen && (
+              <ScrollView style={[st.regionDropdownMenu, darkMode && st.dropdownMenuDark]} nestedScrollEnabled>
+                {TAX_REGION_DATA[taxCountry].map(region => (
+                  <TouchableOpacity
+                    key={region.code}
+                    style={[st.dropdownOption, darkMode && st.dropdownOptionDark, taxState === region.code && st.dropdownOptionActive]}
+                    onPress={() => selectTaxRegion(region.code)}
+                    activeOpacity={0.7}>
+                    <Text style={[st.dropdownOptionText, darkMode && st.textMutedDark, taxState === region.code && st.dropdownOptionTextActive]}>
+                      {region.name}
+                    </Text>
+                    <Text style={[st.dropdownCode, darkMode && st.textMutedDark, taxState === region.code && st.dropdownOptionTextActive]}>
+                      {region.code}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+
+            <View style={st.localityGrid}>
+              <View style={[st.localityField, darkMode && st.localityFieldDark]}>
+                <Text style={[st.dropdownKicker, darkMode && st.textMutedDark]}>
+                  {taxCountry === 'US' ? t('COUNTY / REGION') : t('REGION / COUNTY')}
+                </Text>
+                <TextInput
+                  style={[st.localityInput, darkMode && st.textDark]}
+                  value={localCounty}
+                  onChangeText={setLocalCounty}
+                  autoCapitalize="words"
+                  placeholder={taxCountry === 'US' ? 'County or region' : 'Region or county'}
+                  placeholderTextColor={darkMode ? '#707782' : '#aaa'}
+                  returnKeyType="next"
+                />
+              </View>
+              <View style={[st.localityField, darkMode && st.localityFieldDark]}>
+                <Text style={[st.dropdownKicker, darkMode && st.textMutedDark]}>{t('CITY / TOWN')}</Text>
+                <TextInput
+                  style={[st.localityInput, darkMode && st.textDark]}
+                  value={localCity}
+                  onChangeText={setLocalCity}
+                  autoCapitalize="words"
+                  placeholder="City or town"
+                  placeholderTextColor={darkMode ? '#707782' : '#aaa'}
+                  returnKeyType="done"
+                />
+              </View>
+            </View>
+            <View style={[st.taxBox, darkMode && st.taxBoxDark]}>
+              <Text style={[st.taxBoxState, darkMode && st.taxBoxStateDark]}>
+                {COUNTRY_NAMES[taxCountry]}  ·  {selectedTaxRegion.name}{selectedTaxRegion.rate === 0
+                  ? `  ·  ${t('NO STATE INCOME TAX')}`
+                  : `  ·  ${(selectedTaxRegion.rate * 100).toFixed(1)}% ${t('REGIONAL')}`}
+              </Text>
+              <ERow label={t('FEDERAL (EST.)')} value={`${(taxBreakdown().federal * 100).toFixed(1)}%`} />
+              <ERow label={t('STATE TAX')}      value={`${(taxBreakdown().state   * 100).toFixed(1)}%`} />
+              <ERow label={t('FICA (SS+MED)')}  value={`${(taxBreakdown().fica    * 100).toFixed(1)}%`} />
+              <ERow label={t('EFFECTIVE RATE')} value={`${(taxBreakdown().total   * 100).toFixed(1)}%`} />
+              <ERow label={t('NET TAKE-HOME')}  value={`$${netOf(weekPay()).toFixed(2)} / wk`} small />
+              <Text style={[st.taxDisclaimer, darkMode && st.textMutedDark]}>{t('* ESTIMATE ONLY — NOT TAX ADVICE')}</Text>
+            </View>
+          </Card>
+        )}
+  </>); } // ── end renderTabContent ──────────────────────────────────────────
+
+  return foldedLayout;
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+const Card = React.memo(function Card({children}: {children: React.ReactNode}) {
+  const darkMode = React.useContext(ThemeContext);
+  return <View style={[st.card, darkMode && st.cardDark]}>{children}</View>;
+});
+
+const ERow = React.memo(function ERow({
+  label, value, small,
+}: {label: string; value: string; small?: boolean}) {
+  const darkMode = React.useContext(ThemeContext);
+  return (
+    <View style={[st.eRow, darkMode && st.eRowDark]}>
+      <Text style={[st.eRowKey, darkMode && st.textMutedDark]}>{label}:</Text>
+      <Text style={[st.eRowVal, small && st.eRowValSmall, darkMode && st.textDark]}>{value}</Text>
+    </View>
+  );
+});
+
+// ── TimeField — tap segments to cycle hour / minute / AM-PM ──────────────────
+
+function TimeField({hour, min, onChange}: {
+  hour: number; min: number;
+  onChange: (h: number, m: number) => void;
+}) {
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  const h12  = hour % 12 || 12;
+  // Minutes snap to quarters
+  const cycleMin = () => {
+    const steps = [0, 15, 30, 45];
+    const next  = steps[(steps.indexOf(min) + 1) % 4];
+    onChange(hour, next);
+  };
+  const cycleHour = () => onChange((hour + 1) % 24, min);
+  const toggleAMPM = () => onChange(hour < 12 ? hour + 12 : hour - 12, min);
+
+  return (
+    <View style={st.timeField}>
+      <TouchableOpacity onPress={cycleHour} style={st.timeSegBtn}>
+        <Text style={st.timeSeg}>{String(h12).padStart(2,'0')}</Text>
+        <Text style={st.timeSegHint}>▲</Text>
+      </TouchableOpacity>
+      <Text style={st.timeSep}>:</Text>
+      <TouchableOpacity onPress={cycleMin} style={st.timeSegBtn}>
+        <Text style={st.timeSeg}>{String(min).padStart(2,'0')}</Text>
+        <Text style={st.timeSegHint}>▲</Text>
+      </TouchableOpacity>
+      <TouchableOpacity onPress={toggleAMPM} style={st.timeAmPmBtn}>
+        <Text style={st.timeAmPm}>{ampm}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ── Account Section (Settings tab) ───────────────────────────────────────────
+
+function AccountSection({
+  session,
+  onSignOut,
+  t,
+}: {
+  session: Session;
+  onSignOut: () => void;
+  t: (s: string) => string;
+}) {
+  const darkMode = React.useContext(ThemeContext);
+
+  return (
+    <View>
+      <Text style={[st.sectionLabel, darkMode && st.textMutedDark]}>{t('═══ ACCOUNT ═══')}</Text>
+
+      {/* Show Firebase user info (read-only — managed by Firebase) */}
+      <View style={[st.accountInfoBox, darkMode && st.accountInfoBoxDark]}>
+        <Text style={[st.accountInfoLabel, darkMode && st.textMutedDark]}>{t('SIGNED IN AS:')}</Text>
+        <Text style={[st.accountInfoValue, darkMode && st.textDark]}>{session.displayName}</Text>
+        {session.email ? (
+          <Text style={[st.accountInfoEmail, darkMode && st.textMutedDark]}>{session.email}</Text>
+        ) : null}
+      </View>
+      <Text style={[st.accountHint, darkMode && st.textMutedDark]}>
+        {t('To update your name or email, use your Google / Apple / email account settings.')}
+      </Text>
+
+      {/* Sign out */}
+      <View style={st.accountSignOutRow}>
+        <Text style={st.accountSignedInNote}>{t('● FIREBASE AUTH ACTIVE')}</Text>
+        <TouchableOpacity
+          style={st.signOutBtn}
+          onPress={() =>
+            Alert.alert(
+              t('SIGN OUT'),
+              t('You will need your password to access the app again.'),
+              [
+                {text: t('Cancel'), style: 'cancel'},
+                {text: t('SIGN OUT'), style: 'destructive', onPress: onSignOut},
+              ],
+            )
+          }
+          accessibilityRole="button"
+          accessibilityLabel="Sign out">
+          <Text style={st.signOutBtnText}>{t('SIGN OUT')}</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+// ── New Profile Modal ──────────────────────────────────────────────────────────
+
+function NewProfileModal({
+  visible, value, onChange, onCreate, onCancel,
+}: {
+  visible: boolean; value: string;
+  onChange: (s: string) => void;
+  onCreate: () => void; onCancel: () => void;
+}) {
+  const darkMode = React.useContext(ThemeContext);
+  return (
+    <Modal visible={visible} transparent animationType="fade">
+      <View style={st.overlay}>
+        <View style={st.modalCard}>
+          <Text style={st.modalHeading}>NEW EMPLOYEE PROFILE</Text>
+          <View style={st.dividerSingle} />
+          <Text style={st.fieldLabel}>EMPLOYEE NAME:</Text>
+          <TextInput style={[st.input, darkMode && st.inputDark, darkMode && st.textDark]} value={value} onChangeText={onChange}
+            placeholder="ENTER FULL NAME" placeholderTextColor="#aaa"
+            autoFocus autoCapitalize="characters"
+            returnKeyType="done" onSubmitEditing={onCreate} />
+          <View style={st.rowBtns}>
+            <TouchableOpacity
+              style={[st.modalBtn, st.btnGreen, !value.trim() && st.btnDisabled]}
+              disabled={!value.trim()} onPress={onCreate}>
+              <Text style={st.modalBtnText}>CREATE</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[st.modalBtn, st.btnGray]} onPress={onCancel}>
+              <Text style={[st.modalBtnText, {color: INK}]}>CANCEL</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Confirm Delete Modal ───────────────────────────────────────────────────────
+
+function ConfirmDeleteModal({
+  visible, profileName, onConfirm, onCancel,
+}: {
+  visible: boolean; profileName: string;
+  onConfirm: () => void; onCancel: () => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade">
+      <View style={st.overlay}>
+        <View style={[st.modalCard, st.modalDanger]}>
+          <Text style={st.dangerIcon}>⚠</Text>
+          <Text style={st.modalHeading}>DELETE PROFILE?</Text>
+          <View style={st.dividerSingle} />
+          <View style={st.deleteInfoBox}>
+            <Text style={st.fieldLabel}>EMPLOYEE:</Text>
+            <Text style={st.deleteTargetName}>{profileName.toUpperCase()}</Text>
+          </View>
+          <Text style={st.deleteWarning}>
+            ALL TIME RECORDS WILL BE{'\n'}PERMANENTLY DELETED!
+          </Text>
+          <Text style={st.areYouSure}>ARE YOU SURE?</Text>
+          <View style={st.rowBtns}>
+            <TouchableOpacity style={[st.modalBtn, st.btnRed]} onPress={onConfirm}>
+              <Text style={st.modalBtnText}>YES — DELETE</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[st.modalBtn, st.btnGray]} onPress={onCancel}>
+              <Text style={[st.modalBtnText, {color: INK}]}>NO — KEEP</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ─── Design tokens ────────────────────────────────────────────────────────────
+
+const CREAM = '#f2efe6';
+const INK   = '#1a1a1a';
+const RULED = '#ccc9be';
+const RED_M = '#e8a090';
+const FONT  = Platform.OS === 'ios' ? 'Courier New' : 'monospace';
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const st = StyleSheet.create({
+  // White behind the Dynamic Island / status bar (top) and home indicator (bottom)
+  // gives the clean, professional iOS look — cream lives only inside the scroll content.
+  safe: {flex:1, backgroundColor: '#fff'},
+  unfoldedShell: {flexDirection:'row'},
+  safeDark: {backgroundColor:'#111317'},
+  authSplash: {flex:1, backgroundColor:CREAM, alignItems:'center', justifyContent:'center'},
+  authSplashTitle: {fontFamily:FONT, fontSize:22, fontWeight:'700', letterSpacing:3, color:INK},
+  flex1: {flex:1},
+  mainScroll: {flex:1, backgroundColor:CREAM},
+  mainScrollDark: {backgroundColor:'#15181d'},
+  marginTop12: {marginTop:12},
+  marginTop14: {marginTop:14},
+  marginTop16: {marginTop:16},
+  marginTop18: {marginTop:18},
+  optionalMuted: {fontWeight:'400', color:'#aaa'},
+  textDark: {color:'#f3f5f7'},
+  textMutedDark: {color:'#aeb6c2'},
+  dividerDark: {borderBottomColor:'#eef2f6'},
+  dividerSingleDark: {borderBottomColor:'#39404a'},
+
+  // ── Ruled paper overlay ──
+  ruledPaperContainer: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    // pointerEvents moved to the View prop — style-based version is unreliable
+    // on real devices (causes keyboard taps to be swallowed). See View prop below.
+  },
+  ruled:      {position:'absolute', left:0, right:0, height:1, backgroundColor: RULED},
+  marginLine: {position:'absolute', top:0, bottom:0, left:32, width:1.5, backgroundColor: RED_M, opacity:0.6},
+  hole:       {position:'absolute', left:6, width:20, height:20, borderRadius:10, backgroundColor: CREAM, borderWidth:1, borderColor:'#bbb'},
+
+  // ── Profile screen ──
+  profilePageContent: {padding:20, paddingBottom:48, minHeight:'100%'},
+  stripeRow:   {flexDirection:'row', marginBottom:16, gap:3},
+  stripe:      {height:8, flex:1},
+  profileCard: {backgroundColor:'rgba(255,255,255,0.55)', borderWidth:1, borderColor:'#bbb', padding:20},
+  profileCardDark: {backgroundColor:'#1c2027', borderColor:'#39404a'},
+  corpStamp:   {fontFamily:FONT, fontSize:10, color:'#888', letterSpacing:0.5, textAlign:'center', marginBottom:4},
+  cardTitle:   {fontFamily:FONT, fontSize:28, fontWeight:'700', color:INK, letterSpacing:3, textAlign:'center', marginBottom:4},
+  cardSubtitle:{fontFamily:FONT, fontSize:11, color:'#666', letterSpacing:1, textAlign:'center', marginBottom:16},
+  dividerDouble:{borderBottomWidth:3, borderBottomColor:INK, marginBottom:16},
+  dividerSingle:{borderBottomWidth:1, borderBottomColor:'#ccc', marginVertical:12},
+  fieldLabel:  {fontFamily:FONT, fontSize:11, fontWeight:'700', color:INK, letterSpacing:0.5, marginBottom:8},
+  emptyMsg:    {fontFamily:FONT, fontSize:12, color:'#999', textAlign:'center', paddingVertical:16},
+  profileRow:  {flexDirection:'row', alignItems:'center', backgroundColor:'rgba(255,255,255,0.7)', borderWidth:2, borderColor:'#aaa', padding:12, marginBottom:10, gap:12},
+  profileRowDark:{backgroundColor:'#252a32', borderColor:'#4c5562'},
+  badge:       {width:36, height:36, backgroundColor:INK, alignItems:'center', justifyContent:'center', borderWidth:2, borderColor:'#000'},
+  badgeText:   {fontFamily:FONT, fontSize:14, fontWeight:'700', color:'#fff'},
+  profileName: {fontFamily:FONT, fontSize:15, fontWeight:'700', color:INK, letterSpacing:0.5},
+  profileSince:{fontFamily:FONT, fontSize:10, color:'#777', marginTop:2},
+  redPill:     {backgroundColor:'#c62828', borderWidth:2, borderColor:'#8e0000', paddingVertical:7, paddingHorizontal:10},
+  redPillText: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+  addBtn:      {backgroundColor:INK, borderWidth:3, borderColor:'#000', paddingVertical:16, alignItems:'center', marginTop:4},
+  addBtnText:  {fontFamily:FONT, fontSize:14, fontWeight:'700', color:'#fff', letterSpacing:1},
+
+  // ── App header ──
+  appHeader: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 8,
+    borderBottomWidth: 4,
+    borderBottomColor: INK,
+  },
+  appHeaderDark: {
+    backgroundColor:'#171a20',
+    borderBottomColor:'#4b5563',
+  },
+  appHeaderTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  // Logo — intentionally tiny
+  appLogo: {
+    fontFamily: FONT,
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#aaa',
+    letterSpacing: 2,
+  },
+  // Employee name — the star of the header
+  headerName: {
+    fontFamily: FONT,
+    fontSize: 36,
+    fontWeight: '700',
+    color: INK,
+    letterSpacing: 3,
+    lineHeight: 42,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  // Stat bar: hours | earnings | period label
+  headerStatBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: INK,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 10,
+  },
+  headerStat:      {flexDirection: 'row', alignItems: 'baseline', gap: 3},
+  headerStatValue: {fontFamily: FONT, fontSize: 15, fontWeight: '700', color: '#fff'},
+  headerStatUnit:  {fontFamily: FONT, fontSize: 8,  color: '#aaa', letterSpacing: 0.5},
+  headerStatDivider:{width: 1, height: 14, backgroundColor: '#444'},
+  headerStatPeriod:{fontFamily: FONT, fontSize: 8, color: '#888', letterSpacing: 0.8, flex: 1, textAlign: 'right'},
+  profilesBtn:    {backgroundColor: 'transparent', borderWidth: 1, borderColor: '#ccc', paddingVertical: 5, paddingHorizontal: 10},
+  profilesBtnText:{fontFamily:FONT, fontSize:9, fontWeight:'700', color:'#888', letterSpacing:0.5},
+
+  // ── THREE TAB CARDS ──
+  tabCardRow: {
+    flexDirection: 'row',
+    backgroundColor: '#dedad0',
+    // No bottom border — just a hairline to separate from content
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#bbb',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 0,
+    gap: 6,
+  },
+  tabCardRowDark:{backgroundColor:'#111317', borderBottomColor:'#343b46'},
+  tabCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.40)',
+    borderWidth: 1,
+    borderColor: '#c0bdb4',
+    borderBottomWidth: 0,
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+  },
+  tabCardDark:{backgroundColor:'#1d2229', borderColor:'#343b46'},
+  tabCardActive: {
+    backgroundColor: CREAM,
+    borderColor: '#888',
+    borderWidth: 1.5,
+    borderBottomWidth: 0,
+    // Subtle lift
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: -2},
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  tabCardActiveDark:{backgroundColor:'#262c35', borderColor:'#6b7280'},
+  // textAlign:'center' corrects the optical right-shift that letterSpacing causes
+  // on iOS — letterSpacing adds trailing space, shifting the visual centre right.
+  tabCardGlyph:       {fontFamily:FONT, fontSize:16, color:'#bbb', textAlign:'center'},
+  tabCardGlyphActive: {color: INK},
+  tabCardLabel:       {fontFamily:FONT, fontSize:10, fontWeight:'700', color:'#bbb',
+                       letterSpacing:1, textAlign:'center', width:'100%'},
+  tabCardLabelActive: {color: INK},
+  tabCardSub:         {fontFamily:FONT, fontSize:7, color:'#ccc',
+                       letterSpacing:0.5, textAlign:'center', width:'100%'},
+  tabCardSubActive:   {color:'#777'},
+  tabCardUnderline:   {position:'absolute', top:0, left:0, right:0, height:2, backgroundColor: INK},
+
+  // ── Main content ──
+  mainContent: {padding:14, paddingBottom:48},
+  card: {backgroundColor:'rgba(255,255,255,0.55)', borderWidth:1, borderColor:'#c0bdb4', padding:18, marginBottom:14},
+  cardDark:{backgroundColor:'#20242b', borderColor:'#39404a'},
+  sectionLabel: {fontFamily:FONT, fontSize:11, color:'#777', letterSpacing:1.5, textAlign:'center', marginBottom:14},
+
+  // ── Clock display ──
+  bigClock: {fontFamily:FONT, fontSize:34, fontWeight:'700', color:INK, letterSpacing:2, textAlign:'center', marginBottom:6},
+  dateText:  {fontFamily:FONT, fontSize:11, color:'#555', letterSpacing:0.8, textAlign:'center'},
+
+  // ── Status boxes ──
+  statusOff:     {backgroundColor:'rgba(255,255,255,0.8)', borderWidth:2, borderColor:'#bbb', borderStyle:'dashed', padding:14, alignItems:'center', marginBottom:14},
+  statusOffLabel:{fontFamily:FONT, fontSize:11, color:'#777', letterSpacing:1, marginBottom:4},
+  offDutyText:   {fontFamily:FONT, fontSize:22, fontWeight:'700', color:'#c62828', letterSpacing:2},
+  statusOn:      {backgroundColor:'#edf7ed', borderWidth:2, borderColor:'#2e7d32', padding:14, alignItems:'center', marginBottom:14},
+  statusOnLabel: {fontFamily:FONT, fontSize:10, color:'#1b5e20', letterSpacing:1, marginBottom:4},
+  clockedAtCaption:{fontFamily:FONT, fontSize:11, color:'#555', letterSpacing:0.5},
+  clockedAtTime: {fontFamily:FONT, fontSize:26, fontWeight:'700', color:INK, letterSpacing:2, marginTop:2},
+  shiftChip:     {flexDirection:'row', alignItems:'baseline', backgroundColor:'#fff', borderWidth:2, borderColor:'#2e7d32', paddingHorizontal:16, paddingVertical:7, marginTop:10},
+  shiftCaption:  {fontFamily:FONT, fontSize:11, color:'#555'},
+  shiftValue:    {fontFamily:FONT, fontSize:22, fontWeight:'700', color:INK},
+
+  // ── Punch buttons ──
+  punchInBtn:  {backgroundColor:'#2e7d32', borderWidth:4, borderColor:'#1b5e20', paddingVertical:20, alignItems:'center', shadowColor:'#1b5e20', shadowOffset:{width:0,height:5}, shadowOpacity:1, shadowRadius:0, elevation:5},
+  punchOutBtn: {backgroundColor:'#c62828', borderWidth:4, borderColor:'#8e0000', paddingVertical:20, alignItems:'center', shadowColor:'#8e0000', shadowOffset:{width:0,height:5}, shadowOpacity:1, shadowRadius:0, elevation:5},
+  punchLabel:  {fontFamily:FONT, fontSize:18, fontWeight:'700', color:'#fff', letterSpacing:2},
+
+  // ── Break ──
+  breakSection: {marginBottom:14},
+  breakCaption: {fontFamily:FONT, fontSize:11, color:'#777', letterSpacing:1, textAlign:'center', marginBottom:10, paddingBottom:8, borderBottomWidth:1, borderBottomColor:'#ddd'},
+  breakRow:     {flexDirection:'row', gap:8},
+  breakChip:    {flex:1, backgroundColor:'rgba(255,255,255,0.8)', borderWidth:2, borderColor:'#888', paddingVertical:13, alignItems:'center'},
+  breakChipLabel:{fontFamily:FONT, fontSize:12, fontWeight:'700', color:INK, letterSpacing:0.5},
+  onBreakBox:   {backgroundColor:'#fff8e1', borderWidth:3, borderColor:'#f57c00', padding:16, alignItems:'center', marginBottom:14},
+  onBreakCaption:{fontFamily:FONT, fontSize:11, color:'#5d3100', letterSpacing:1, marginBottom:6},
+  breakCountdown:{fontFamily:FONT, fontSize:38, fontWeight:'700', color:'#e65100', letterSpacing:4, marginBottom:10},
+  endBreakBtn:  {backgroundColor:'#fff', borderWidth:2, borderColor:'#e65100', paddingVertical:9, paddingHorizontal:22},
+  endBreakLabel:{fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#5d3100', letterSpacing:0.5},
+  clockBackInBtn:  {backgroundColor:'#e65100', borderWidth:3, borderColor:'#bf360c', paddingVertical:14, paddingHorizontal:18, alignSelf:'stretch', alignItems:'center', marginTop:4},
+  clockBackInLabel:{fontFamily:FONT, fontSize:15, fontWeight:'700', color:'#fff', letterSpacing:1},
+  breakOverNote:   {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#bf360c', letterSpacing:0.5, marginBottom:10, textAlign:'center'},
+
+  // Return-to-work time inside the break box
+  breakReturnRow:  {flexDirection:'row', alignItems:'baseline', gap:6, marginBottom:12},
+  breakReturnLabel:{fontFamily:FONT, fontSize:9, color:'#5d3100', letterSpacing:1, opacity:0.7},
+  breakReturnTime: {fontFamily:FONT, fontSize:18, fontWeight:'700', color:'#e65100', letterSpacing:1},
+
+  // Break chip in the header black stat bar
+  headerBreakChip: {flexDirection:'column', alignItems:'flex-end', marginLeft:'auto' as any},
+  headerBreakTime: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#f57c00', letterSpacing:0.5},
+  headerBreakReturn:{fontFamily:FONT, fontSize:7, color:'#f57c00', letterSpacing:0.5, opacity:0.85},
+
+  // ── Earnings ──
+  earningsBig:       {backgroundColor:'#fff', borderWidth:2, borderColor:'#2e7d32', padding:14, alignItems:'center', marginBottom:10},
+  earningsBigCaption:{fontFamily:FONT, fontSize:11, color:'#555', letterSpacing:0.5, marginBottom:4},
+  earningsBigAmt:    {fontFamily:FONT, fontSize:36, fontWeight:'700', color:'#1b5e20', letterSpacing:2},
+  earningsRow:       {flexDirection:'row', gap:8, marginBottom:10},
+  earningsTwo:       {flex:1, backgroundColor:'#fff', borderWidth:2, padding:10, alignItems:'center'},
+  earningsTwoToday:  {borderColor:'#2e7d32'},
+  earningsTwoWeek:   {borderColor:'#1565c0'},
+  earningsTwoCaption:{fontFamily:FONT, fontSize:9, color:'#555', letterSpacing:0.5, marginBottom:4, textAlign:'center'},
+  earningsTwoAmt:    {fontFamily:FONT, fontSize:21, fontWeight:'700', color:'#1b5e20', letterSpacing:1},
+  earningsTwoAmtBlue:{color:'#0d47a1'},
+  earningsTwoNet:    {fontFamily:FONT, fontSize:10, color:'#444', marginTop:5, letterSpacing:0.3},
+  eRow:    {flexDirection:'row', justifyContent:'space-between', alignItems:'center', backgroundColor:'rgba(255,255,255,0.7)', borderWidth:1, borderColor:'#ccc', paddingHorizontal:12, paddingVertical:9, marginBottom:5},
+  eRowDark:{backgroundColor:'#171a20', borderColor:'#343b46'},
+  eRowKey: {fontFamily:FONT, fontSize:11, color:'#666'},
+  eRowVal: {fontFamily:FONT, fontSize:12, fontWeight:'700', color:INK, flexShrink:1, textAlign:'right'},
+  eRowValSmall: {fontSize:10},
+
+  // ── Dark variants: punch + history content ──
+  statusOffDark:     {backgroundColor:'#171a20', borderColor:'#4b5563'},
+  statusOnDark:      {backgroundColor:'#16241a', borderColor:'#2e7d32'},
+  statusOnLabelDark: {color:'#7bd389'},
+  shiftChipDark:     {backgroundColor:'#171a20', borderColor:'#2e7d32'},
+  breakChipDark:     {backgroundColor:'#20242b', borderColor:'#5b636f'},
+  onBreakBoxDark:    {backgroundColor:'#2a2412', borderColor:'#f57c00'},
+  onBreakInkDark:    {color:'#e8c07a'},
+  earningsTwoDark:   {backgroundColor:'#171a20'},
+  amtGreenDark:      {color:'#7bd389'},
+  amtBlueDark:       {color:'#79b6f2'},
+  folderBodyDark:    {backgroundColor:'#15181d'},
+  dayGroupDark:      {borderTopColor:'#343b46'},
+  dayHeaderDark:     {backgroundColor:'rgba(255,255,255,0.06)'},
+  dayTotalDark:      {color:'#7bd389'},
+  sessionRowDark:    {backgroundColor:'#171a20', borderTopColor:'#343b46'},
+  sessionEarningsDark:{color:'#7bd389'},
+  sessionBreaksBoxDark:{borderTopColor:'#343b46'},
+
+  // ── Dark variants: widget ──
+  widgetDark:            {backgroundColor:'#1c2027', borderColor:'#4b5563'},
+  widgetStatusOnDark:    {backgroundColor:'#16241a', borderColor:'#2e7d32'},
+  widgetStatusOffDark:   {backgroundColor:'#2f1917', borderColor:'#b71c1c'},
+  widgetStatusBreakDark: {backgroundColor:'#2a2412', borderColor:'#e65100'},
+  widgetStatusTextDark:  {color:'#f3f5f7'},
+  widgetBreakDark:       {backgroundColor:'#20242b', borderColor:'#e65100'},
+  // ── Dark variants: schedule ──
+  calNavBtnDark:         {backgroundColor:'rgba(255,255,255,0.06)'},
+  calCellTodayDark:      {backgroundColor:'rgba(255,255,255,0.08)'},
+  calLegendDark:         {borderTopColor:'#343b46'},
+  schedTypeBtnDark:      {borderColor:'#4b5563'},
+  schedTypeBtnActiveDark:{backgroundColor:'#3a3f48', borderColor:'#6b7280'},
+  rotPeriodBtnDark:      {borderColor:'#4b5563'},
+  rotPeriodBtnActiveDark:{backgroundColor:'#3a3f48', borderColor:'#6b7280'},
+  podCardDark:           {backgroundColor:'#171a20', borderColor:'#39404a'},
+  podCardActiveDark:     {borderColor:'#9aa3b0'},
+  podNameInputDark:      {borderBottomColor:'#39404a'},
+  podDayChipDark:        {borderColor:'#4b5563'},
+  podDayChipActiveDark:  {backgroundColor:'#3a3f48', borderColor:'#6b7280'},
+  addPodBtnDark:         {borderColor:'#4b5563'},
+  schedToggleDark:       {backgroundColor:'#20242b', borderColor:'#4b5563'},
+  schedToggleOnDark:     {backgroundColor:'#7bd389', borderColor:'#7bd389'},
+  schedRowDark:          {borderBottomColor:'#2a2f37'},
+  flexDayRowTodayDark:   {backgroundColor:'rgba(255,255,255,0.05)'},
+
+  // ── History / folders ──
+  historyTop: {flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:14},
+
+  folder:      {marginBottom:12, borderWidth:2, borderColor:'#999', overflow:'hidden'},
+  folderHeader:{
+    flexDirection:'row', alignItems:'center',
+    backgroundColor: INK,
+    padding:12,
+  },
+  folderHeaderCurrent: {backgroundColor:'#1b5e20'},  // green tint for active period
+  currentPeriodBadge:  {fontFamily:FONT, fontSize:9, color:'#a5d6a7', letterSpacing:1, marginBottom:3},
+  folderLabel:  {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+  folderTotals: {fontFamily:FONT, fontSize:11, color:'#ccc', marginTop:3},
+  folderTabArrow:{
+    width:28, height:28, backgroundColor:'rgba(255,255,255,0.15)',
+    alignItems:'center', justifyContent:'center',
+    borderWidth:1, borderColor:'rgba(255,255,255,0.2)',
+    marginLeft:8,
+  },
+  folderArrowText:{fontFamily:FONT, fontSize:13, color:'#fff'},
+
+  folderBody: {backgroundColor: CREAM},
+
+  dayGroup:  {borderTopWidth:1, borderTopColor:'#ccc'},
+  dayHeader: {flexDirection:'row', justifyContent:'space-between', alignItems:'center', backgroundColor:'rgba(0,0,0,0.06)', paddingHorizontal:12, paddingVertical:7},
+  dayDate:   {fontFamily:FONT, fontSize:11, fontWeight:'700', color:INK, letterSpacing:0.5},
+  dayTotal:  {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#2e7d32'},
+
+  sessionRow:      {backgroundColor:'rgba(255,255,255,0.6)', paddingHorizontal:14, paddingVertical:9, borderTopWidth:1, borderTopColor:'#e0e0e0'},
+  sessionTimes:    {flexDirection:'row', justifyContent:'flex-start', gap:16, marginBottom:3},
+  sessionTime:     {fontFamily:FONT, fontSize:11, color:'#555'},
+  sessionEarnings: {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#2e7d32'},
+  sessionBreakSummaryPaid: {color:'#2e7d32'},
+
+  // Break rows inside a session
+  sessionBreaksBox:      {marginTop:6, paddingTop:6, borderTopWidth:StyleSheet.hairlineWidth, borderTopColor:'#ddd', gap:3},
+  sessionBreakRow:       {flexDirection:'row', alignItems:'center', gap:6},
+  sessionBreakBadge:     {paddingHorizontal:5, paddingVertical:1.5, borderRadius:2},
+  sessionBreakBadgePaid: {backgroundColor:'#e8f5e9', borderWidth:1, borderColor:'#2e7d32'},
+  sessionBreakBadgeUnpaid:{backgroundColor:'#fff3e0', borderWidth:1, borderColor:'#f57c00'},
+  sessionBreakBadgeText: {fontFamily:FONT, fontSize:7, fontWeight:'700', color:INK, letterSpacing:0.3},
+  sessionBreakDetail:    {fontFamily:FONT, fontSize:9, color:'#777'},
+  sessionBreakSummary:   {fontFamily:FONT, fontSize:8, color:'#c62828', marginTop:2, letterSpacing:0.2},
+
+  // ── Foldable two-column layout ──
+  // Inner screen (unfolded) ≈ 707 dp wide; cover screen ≈ 369 dp.
+  foldSidebar: {
+    width: 244,
+    backgroundColor: '#fbfaf6',
+    borderRightWidth: 1,
+    borderRightColor: '#d8d2c3',
+    paddingTop: 16,
+    paddingHorizontal: 14,
+    paddingBottom: 16,
+    justifyContent: 'flex-start',
+  },
+  foldSidebarDark:{backgroundColor:'#14171c', borderRightColor:'#39404a'},
+  foldSidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingBottom: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#d8d2c3',
+    marginBottom: 12,
+  },
+  foldSidebarHeaderDark:{borderBottomColor:'#39404a'},
+  foldBrandBlock: {flex: 1, minWidth: 0},
+  foldBrandKicker: {
+    fontFamily: FONT,
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#9b9486',
+    letterSpacing: 1.4,
+    marginBottom: 2,
+  },
+  foldBrandTitle: {
+    fontFamily: FONT,
+    fontSize: 13,
+    fontWeight: '700',
+    color: INK,
+    letterSpacing: 0.8,
+  },
+  foldProfilesBtn: {
+    borderWidth: 1,
+    borderColor: '#b8b1a3',
+    backgroundColor: '#fff',
+    paddingVertical: 6,
+    paddingHorizontal: 9,
+    alignSelf: 'flex-start',
+  },
+  foldProfilesBtnText: {
+    fontFamily: FONT,
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#6f695f',
+    letterSpacing: 0.8,
+  },
+  foldEmployeeCard: {
+    backgroundColor: 'rgba(255,255,255,0.78)',
+    borderWidth: 1,
+    borderColor: '#c8c0b2',
+    padding: 12,
+    marginBottom: 10,
+  },
+  foldEmployeeCardDark:{backgroundColor:'#20242b', borderColor:'#39404a'},
+  foldProfileEyebrow: {
+    fontFamily: FONT,
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#9b9486',
+    letterSpacing: 1,
+    marginBottom: 5,
+  },
+  foldEmployeeName: {
+    fontFamily: FONT,
+    fontSize: 21,
+    fontWeight: '700',
+    color: INK,
+    letterSpacing: 0.8,
+    lineHeight: 25,
+    marginBottom: 10,
+  },
+  foldDutyPill: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  foldDutyPillOn: {backgroundColor: '#e8f5e9', borderColor: '#2e7d32'},
+  foldDutyPillOff: {backgroundColor: '#f8eeee', borderColor: '#c62828'},
+  foldDutyText: {fontFamily: FONT, fontSize: 8, fontWeight: '700', letterSpacing: 0.7},
+  foldDutyTextOn: {color: '#1b5e20'},
+  foldDutyTextOff: {color: '#8e0000'},
+  foldStatCol: {
+    backgroundColor: INK,
+    padding: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#000',
+  },
+  foldStatRow: {flexDirection: 'row', gap: 8, marginBottom: 8},
+  foldStat: {
+    flex: 1,
+    minHeight: 46,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#343434',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  foldStatVal: {
+    fontFamily: FONT,
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#fff',
+    lineHeight: 19,
+  },
+  foldStatUnit: {
+    fontFamily: FONT,
+    fontSize: 7,
+    color: '#aaa',
+    letterSpacing: 0.6,
+    marginTop: 2,
+  },
+  foldStatDivider:     {height:1, backgroundColor:'#333', marginVertical:2},
+  foldStatPeriod: {
+    fontFamily: FONT,
+    fontSize: 8,
+    color: '#b8b8b8',
+    letterSpacing: 0.5,
+    lineHeight: 12,
+  },
+  foldBreakBadge: {
+    backgroundColor: '#fff8e1',
+    borderWidth: 1,
+    borderColor: '#f57c00',
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+  foldBreakBadgeTime: {
+    fontFamily: FONT,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#e65100',
+    textAlign: 'center',
+  },
+  foldBreakBadgeReturn: {
+    fontFamily: FONT,
+    fontSize: 8,
+    color: '#8a4a00',
+    marginTop: 3,
+    textAlign: 'center',
+    letterSpacing: 0.4,
+  },
+  foldTabList:         {flex:1, marginTop:6, gap:5},
+  foldTabItem:         {
+    flexDirection:'row', alignItems:'center', gap:10,
+    minHeight: 54,
+    paddingVertical:9, paddingHorizontal:9,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    position:'relative',
+  },
+  foldTabItemDark:{borderColor:'transparent'},
+  foldTabItemActive:   {backgroundColor: '#fff', borderColor: '#c8c0b2'},
+  foldTabItemActiveDark:{backgroundColor:'#262c35', borderColor:'#4b5563'},
+  foldTabGlyph:        {fontFamily:FONT, fontSize:17, color:'#aaa', width:24, textAlign:'center'},
+  foldTabGlyphActive:  {color:INK},
+  foldTabLabel:        {fontFamily:FONT, fontSize:10, fontWeight:'700', color:'#8e877b', letterSpacing:0.4},
+  foldTabLabelActive:  {color:INK},
+  foldTabSub:          {fontFamily:FONT, fontSize:8, color:'#aaa', lineHeight:11},
+  foldTabSubActive:    {color:'#555'},
+  foldTabActiveBar:    {position:'absolute', left:-1, top:7, bottom:7, width:3, backgroundColor:INK},
+  foldLogoBottom: {
+    fontFamily: FONT,
+    fontSize: 8,
+    color: '#aaa',
+    letterSpacing: 1.2,
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#d8d2c3',
+  },
+  foldContentPanel:    {flex:1, backgroundColor:CREAM},
+  foldContentPanelDark:{backgroundColor:'#15181d'},
+  mainContentWide:     {width:'100%', maxWidth:720, alignSelf:'center', padding:20, paddingBottom:56},
+
+  // ── Paid / Unpaid break pill ──
+  breakTypePill:       {alignSelf:'center', paddingHorizontal:10, paddingVertical:4, borderRadius:2, marginTop:6},
+  breakTypePillPaid:   {backgroundColor:'#e8f5e9', borderWidth:1, borderColor:'#2e7d32'},
+  breakTypePillUnpaid: {backgroundColor:'#fff3e0', borderWidth:1, borderColor:'#f57c00'},
+  breakTypePillText:   {fontFamily:FONT, fontSize:9, fontWeight:'700', letterSpacing:0.5, color:INK},
+
+  // ── Scan to Punch ──
+  scanBtn: {
+    borderWidth: 2, borderColor: INK,
+    paddingVertical: 14, alignItems: 'center',
+    marginTop: 8, flexDirection: 'row', justifyContent: 'center', gap: 8,
+  },
+  scanBtnDark: {borderColor:'#4b5563', backgroundColor:'#171a20'},
+  scanBtnText: {fontFamily:FONT, fontSize:13, fontWeight:'700', color:INK, letterSpacing:1},
+  scanBtnTextDark: {color:'#eef2f6'},
+
+  // Scan toggle in Settings
+  scanToggleRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingVertical: 10,
+  },
+  scanToggleRowDark:{borderColor:'#343b46'},
+  scanToggleLabel: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:INK, letterSpacing:0.5, marginBottom:4},
+  scanToggleDesc:  {fontFamily:FONT, fontSize:9, color:'#888', lineHeight:14},
+  scanTogglePill:  {
+    width: 46, height: 26, borderRadius: 13,
+    backgroundColor: '#ddd', padding: 2,
+    justifyContent: 'center',
+  },
+  scanTogglePillOn:  {backgroundColor: INK},
+  scanToggleThumb:   {
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: '#fff',
+    shadowColor: '#000', shadowOffset: {width: 0, height: 1},
+    shadowOpacity: 0.25, shadowRadius: 2, elevation: 2,
+  },
+  scanToggleThumbOn: {transform: [{translateX: 20}]},
+
+  // ── Disclaimer ──
+  disclaimer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#ccc9be',
+  },
+  disclaimerIcon: {fontSize: 10, color: '#b0ab9e', marginTop: 1},
+  disclaimerText: {
+    fontFamily: FONT,
+    fontSize: 9,
+    color: '#b0ab9e',
+    lineHeight: 14,
+    flex: 1,
+    letterSpacing: 0.2,
+  },
+
+  // ── Settings / Account ──
+  accountHint: {fontFamily:FONT, fontSize:9, color:'#aaa', marginTop:4, marginBottom:8, lineHeight:13},
+  accountInfoBox:   {backgroundColor:'rgba(255,255,255,0.7)', borderWidth:2, borderColor:'#aaa', padding:12, marginBottom:4},
+  accountInfoBoxDark:{backgroundColor:'#171a20', borderColor:'#4b5563'},
+  accountInfoLabel: {fontFamily:FONT, fontSize:9, color:'#888', letterSpacing:0.5, marginBottom:4},
+  accountInfoValue: {fontFamily:FONT, fontSize:15, fontWeight:'700', color:INK, letterSpacing:0.5},
+  accountInfoEmail: {fontFamily:FONT, fontSize:10, color:'#666', marginTop:2},
+  appleButton: {height:48,width:'100%',marginBottom:8},
+  appleLinkedNote: {
+    fontFamily:FONT,fontSize:11,fontWeight:'700',color:'#1b5e20',
+    borderWidth:1,borderColor:'#2e7d32',padding:10,marginBottom:8,
+  },
+  appleUnavailableNote: {
+    fontFamily:FONT,fontSize:9,color:'#888',lineHeight:13,marginBottom:8,
+  },
+
+  // ── Late chip ──
+  lateChip: {
+    backgroundColor: '#fff3f3', borderWidth: 1, borderColor: '#c62828',
+    paddingHorizontal: 12, paddingVertical: 6, marginTop: 8, alignItems: 'center',
+  },
+  lateText: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#c62828', letterSpacing:0.5},
+
+  // ── Calendar ──
+  calNavRow: {flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:10},
+  calNavBtn: {paddingHorizontal:12, paddingVertical:6, backgroundColor:'rgba(0,0,0,0.04)', borderRadius:4},
+  calNavBtnText: {fontFamily:FONT, fontSize:14, color:INK},
+  calTitle: {fontFamily:FONT, fontSize:13, fontWeight:'700', color:INK, letterSpacing:1},
+  calRow: {flexDirection:'row'},
+  calDayHeader: {
+    flex:1, textAlign:'center', fontFamily:FONT, fontSize:9,
+    fontWeight:'700', color:'#aaa', letterSpacing:0.5, paddingVertical:4,
+  },
+  calCell: {
+    flex:1, alignItems:'center', paddingVertical:5, minHeight:36,
+  },
+  calCellToday: {backgroundColor:'rgba(26,26,26,0.06)', borderRadius:4},
+  calCellOff:   {opacity: 0.4},
+  calDayNum: {fontFamily:FONT, fontSize:12, color:INK, fontWeight:'400'},
+  calDayNumToday: {fontWeight:'700'},
+  calDayNumOff: {color:'#bbb'},
+  calDot: {width:5, height:5, borderRadius:3, marginTop:2, backgroundColor:'transparent'},
+  calLegend: {flexDirection:'row', justifyContent:'center', gap:16, marginTop:10, paddingTop:8, borderTopWidth:StyleSheet.hairlineWidth, borderTopColor:'#ddd'},
+  calLegendItem: {flexDirection:'row', alignItems:'center', gap:4},
+  calLegendText: {fontFamily:FONT, fontSize:8, color:'#888', letterSpacing:0.3},
+  calHint: {fontFamily:FONT, fontSize:9, color:'#aaa', textAlign:'center', marginBottom:12, lineHeight:14},
+
+  // Active pod banner
+  activePodBanner: {backgroundColor:INK, padding:8, alignItems:'center', marginBottom:10},
+  activePodBannerText: {fontFamily:FONT, fontSize:10, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+  activePodBannerSub:  {fontFamily:FONT, fontSize:8, color:'#888', marginTop:2},
+
+  // Schedule type toggle
+  schedTypeRow:          {flexDirection:'row', gap:8, marginBottom:4},
+  schedTypeBtn:          {flex:1, paddingVertical:10, alignItems:'center', borderWidth:1, borderColor:'#ccc', borderRadius:4},
+  schedTypeBtnActive:    {backgroundColor:INK, borderColor:INK},
+  schedTypeBtnText:      {fontFamily:FONT, fontSize:10, fontWeight:'700', color:'#aaa', letterSpacing:0.5},
+  schedTypeBtnTextActive:{color:'#fff'},
+
+  // Rotation period selector
+  rotPeriodRow:          {flexDirection:'row', gap:6, marginTop:6},
+  rotPeriodBtn:          {flex:1, paddingVertical:8, alignItems:'center', borderWidth:1, borderColor:'#ccc', borderRadius:4},
+  rotPeriodBtnActive:    {backgroundColor:INK, borderColor:INK},
+  rotPeriodBtnText:      {fontFamily:FONT, fontSize:8, fontWeight:'700', color:'#aaa', letterSpacing:0.3},
+  rotPeriodBtnTextActive:{color:'#fff'},
+
+  // Pod card
+  podCard: {
+    borderWidth:1, borderColor:'#ddd', padding:12,
+    marginBottom:10, backgroundColor:'rgba(255,255,255,0.5)',
+  },
+  podCardActive: {borderColor:INK, borderWidth:1.5},
+  podHeader: {flexDirection:'row', alignItems:'center', gap:8, marginBottom:8},
+  podNameInput: {
+    flex:1, fontFamily:FONT, fontSize:13, fontWeight:'700', color:INK,
+    borderBottomWidth:1, borderBottomColor:'#ddd', paddingVertical:2,
+  },
+  podActiveBadge:     {backgroundColor:'#e8f5e9', borderWidth:1, borderColor:'#2e7d32', paddingHorizontal:6, paddingVertical:2},
+  podActiveBadgeText: {fontFamily:FONT, fontSize:8, fontWeight:'700', color:'#1b5e20'},
+  podDeleteBtn:       {padding:4},
+  podDeleteBtnText:   {fontFamily:FONT, fontSize:12, color:'#c62828', fontWeight:'700'},
+
+  // Pod day checkboxes
+  podDayRow:          {flexDirection:'row', gap:4, marginBottom:10},
+  podDayChip:         {flex:1, paddingVertical:6, alignItems:'center', borderWidth:1, borderColor:'#ddd', borderRadius:3},
+  podDayChipActive:   {backgroundColor:INK, borderColor:INK},
+  podDayChipText:     {fontFamily:FONT, fontSize:8, fontWeight:'700', color:'#bbb'},
+  podDayChipTextActive:{color:'#fff'},
+
+  // Add pod button
+  addPodBtn:     {borderWidth:1, borderColor:'#aaa', paddingVertical:10, alignItems:'center', marginTop:4},
+  addPodBtnText: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#555', letterSpacing:0.5},
+
+  // ── Flex week editor ──
+  flexWeekNav:   {flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginVertical:8},
+  flexWeekLabel: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:INK, letterSpacing:0.3, textAlign:'center', flex:1},
+  flexJumpBtn:   {alignItems:'center', paddingVertical:5, marginBottom:8},
+  flexJumpBtnText:{fontFamily:FONT, fontSize:9, color:'#888', textDecorationLine:'underline', letterSpacing:0.3},
+  flexDayRow:    {
+    flexDirection:'row', alignItems:'center',
+    paddingVertical:9,
+    borderBottomWidth:StyleSheet.hairlineWidth, borderBottomColor:'#eee',
+    gap:10,
+  },
+  flexDayRowToday: {backgroundColor:'rgba(26,26,26,0.04)', marginHorizontal:-4, paddingHorizontal:4, borderRadius:4},
+  flexDayDate:   {fontFamily:FONT, fontSize:9, color:'#aaa', marginTop:1},
+
+  // ── Schedule editor ──
+  schedRow: {
+    flexDirection:'row', alignItems:'center',
+    paddingVertical:10, borderBottomWidth:StyleSheet.hairlineWidth, borderBottomColor:'#eee',
+    gap:10,
+  },
+  schedRowOff: {opacity:0.55},
+  schedDayBtn: {flexDirection:'row', alignItems:'center', gap:6, width:60},
+  schedToggle: {
+    width:16, height:16, borderRadius:8,
+    borderWidth:2, borderColor:'#ccc', backgroundColor:'#fff',
+  },
+  schedToggleOn: {backgroundColor:INK, borderColor:INK},
+  schedDayLabel: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#aaa', letterSpacing:0.5},
+  schedDayLabelOn: {color:INK},
+  schedTimes: {flex:1, flexDirection:'row', alignItems:'center', gap:6},
+  schedDash: {fontFamily:FONT, fontSize:12, color:'#aaa'},
+  schedOffLabel: {fontFamily:FONT, fontSize:10, color:'#ccc', letterSpacing:1},
+
+  // ── TimeField ──
+  timeField: {flexDirection:'row', alignItems:'center', gap:2},
+  timeSegBtn: {alignItems:'center'},
+  timeSeg: {fontFamily:FONT, fontSize:13, fontWeight:'700', color:INK, backgroundColor:'rgba(0,0,0,0.05)', paddingHorizontal:5, paddingVertical:2, borderRadius:3},
+  timeSegHint: {fontFamily:FONT, fontSize:6, color:'#aaa', marginTop:1},
+  timeSep: {fontFamily:FONT, fontSize:13, color:'#aaa', marginHorizontal:1},
+  timeAmPmBtn: {backgroundColor:'rgba(0,0,0,0.05)', paddingHorizontal:4, paddingVertical:4, borderRadius:3, marginLeft:2},
+  timeAmPm: {fontFamily:FONT, fontSize:9, fontWeight:'700', color:INK},
+  accountSignOutRow: {flexDirection:'row', alignItems:'center', justifyContent:'space-between', marginTop:14, gap:10},
+  accountSignedInNote: {fontFamily:FONT, fontSize:9, color:'#2e7d32', letterSpacing:0.3, flex:1, lineHeight:13},
+  saveBtn:     {backgroundColor:INK, borderWidth:2, borderColor:'#000', paddingVertical:12, alignItems:'center', marginTop:10},
+  saveBtnDone: {backgroundColor:'#2e7d32', borderColor:'#1b5e20'},
+  saveBtnText: {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#fff', letterSpacing:1},
+  signOutBtn: {
+    backgroundColor: '#c62828', borderWidth: 2, borderColor: '#8e0000',
+    paddingVertical: 8, paddingHorizontal: 12,
+  },
+  signOutBtnText: {fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+  input:       {fontFamily:FONT, fontSize:16, fontWeight:'700', color:INK, borderWidth:2, borderColor:'#999', backgroundColor:'rgba(255,255,255,0.8)', paddingHorizontal:12, paddingVertical:10, marginBottom:4},
+  inputDark:   {color:'#f3f5f7', borderColor:'#4b5563', backgroundColor:'#171a20'},
+  radioRow:    {flexDirection:'row', alignItems:'center', borderWidth:2, borderColor:'#ccc', backgroundColor:'rgba(255,255,255,0.5)', paddingHorizontal:14, paddingVertical:12, marginBottom:7, gap:12},
+  radioRowDark:{borderColor:'#3b4350', backgroundColor:'#171a20'},
+  radioRowActive:{borderColor:INK, borderWidth:3, backgroundColor:'rgba(255,255,255,0.85)'},
+  radioRowActiveDark:{borderColor:'#eef2f6', backgroundColor:'#262c35'},
+  radioCircle: {width:16, height:16, borderRadius:8, borderWidth:2, borderColor:'#aaa'},
+  radioFilled: {backgroundColor:INK, borderColor:INK},
+  radioLabel:  {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#888', letterSpacing:0.5},
+  radioLabelActive:{color:INK},
+  // — tax location picker —
+  dropdownButton: {
+    flexDirection:'row', alignItems:'center', justifyContent:'space-between',
+    borderWidth:2, borderColor:'#999', backgroundColor:'rgba(255,255,255,0.82)',
+    paddingHorizontal:12, paddingVertical:11, marginBottom:7, gap:12,
+  },
+  dropdownButtonDark:{borderColor:'#4b5563', backgroundColor:'#171a20'},
+  dropdownKicker: {fontFamily:FONT, fontSize:9, fontWeight:'700', color:'#777', letterSpacing:0.7, marginBottom:3},
+  dropdownValue:  {fontFamily:FONT, fontSize:13, fontWeight:'700', color:INK, letterSpacing:0.3},
+  dropdownArrow:  {fontFamily:FONT, fontSize:14, fontWeight:'700', color:INK},
+  dropdownMenu:   {borderWidth:2, borderColor:'#999', borderTopWidth:0, backgroundColor:'#fff', marginTop:-7, marginBottom:9},
+  dropdownMenuDark:{borderColor:'#4b5563', backgroundColor:'#171a20'},
+  regionDropdownMenu: {
+    maxHeight:260, borderWidth:2, borderColor:'#999', borderTopWidth:0,
+    backgroundColor:'#fff', marginTop:-7, marginBottom:9,
+  },
+  dropdownOption: {
+    minHeight:42, flexDirection:'row', alignItems:'center', justifyContent:'space-between',
+    paddingHorizontal:12, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#e1e1e1',
+  },
+  dropdownOptionDark:{borderBottomColor:'#343b46'},
+  dropdownOptionActive:{backgroundColor:INK},
+  dropdownOptionText:{fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#555', letterSpacing:0.3, flex:1},
+  dropdownOptionTextActive:{color:'#fff'},
+  dropdownCode:{fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#888', letterSpacing:0.5, marginLeft:10},
+  localityGrid:{gap:8, marginBottom:12},
+  localityField:{borderWidth:2, borderColor:'#bbb', backgroundColor:'rgba(255,255,255,0.58)', paddingHorizontal:12, paddingTop:9, paddingBottom:6},
+  localityFieldDark:{borderColor:'#4b5563', backgroundColor:'#171a20'},
+  localityInput:{fontFamily:FONT, fontSize:14, fontWeight:'700', color:INK, paddingVertical:4, paddingHorizontal:0},
+  taxBox:      {backgroundColor:'#fff', borderWidth:2, borderColor:'#1565c0', padding:12, marginBottom:6},
+  taxBoxDark:  {backgroundColor:'#121820', borderColor:'#3b82f6'},
+  taxBoxState: {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#0d47a1', letterSpacing:0.5, marginBottom:8, textAlign:'center'},
+  taxBoxStateDark:{color:'#93c5fd'},
+  taxDisclaimer:{fontFamily:FONT, fontSize:9, color:'#999', letterSpacing:0.5, textAlign:'center', marginTop:6},
+  // — floating widget —
+  widget:        {position:'absolute', bottom:24, right:12, width:170, backgroundColor:CREAM, borderWidth:2, borderColor:INK, zIndex:9999, elevation:12, shadowColor:'#000', shadowOpacity:0.3, shadowRadius:8, shadowOffset:{width:0,height:4}},
+  widgetBar:     {flexDirection:'row', alignItems:'center', justifyContent:'space-between', backgroundColor:INK, paddingHorizontal:9, paddingVertical:6},
+  widgetBarText: {fontFamily:FONT, fontSize:10, fontWeight:'700', color:'#fff', letterSpacing:1},
+  widgetBarBtns: {flexDirection:'row', gap:14},
+  widgetBarBtn:  {fontFamily:FONT, fontSize:13, fontWeight:'700', color:'#fff'},
+  widgetBody:    {padding:9, gap:7},
+  widgetStatus:  {borderWidth:2, paddingVertical:5, alignItems:'center'},
+  widgetStatusOn:   {borderColor:'#2e7d32', backgroundColor:'#e8f5e9'},
+  widgetStatusOff:  {borderColor:'#b71c1c', backgroundColor:'#fdecea'},
+  widgetStatusBreak:{borderColor:'#e65100', backgroundColor:'#fff3e0'},
+  widgetStatusText: {fontFamily:FONT, fontSize:12, fontWeight:'700', letterSpacing:1, color:INK},
+  widgetMetaRow: {flexDirection:'row', justifyContent:'space-between', alignItems:'center'},
+  widgetMeta:    {fontFamily:FONT, fontSize:11, color:'#555'},
+  widgetMetaPay: {fontFamily:FONT, fontSize:13, fontWeight:'700', color:'#1b5e20'},
+  widgetPunchIn: {backgroundColor:'#2e7d32', borderWidth:2, borderColor:'#1b5e20', paddingVertical:9, alignItems:'center'},
+  widgetPunchOut:{backgroundColor:'#d32f2f', borderWidth:2, borderColor:'#b71c1c', paddingVertical:9, alignItems:'center'},
+  widgetBreak:   {backgroundColor:'#fff', borderWidth:2, borderColor:'#e65100', paddingVertical:8, alignItems:'center'},
+  widgetClockBack:{backgroundColor:'#e65100', borderWidth:2, borderColor:'#bf360c', paddingVertical:9, alignItems:'center'},
+  widgetBtnLight:{fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+  widgetBtnDark: {fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#bf360c', letterSpacing:0.5},
+  widgetReopen:  {position:'absolute', bottom:24, right:12, backgroundColor:INK, borderWidth:2, borderColor:'#000', paddingHorizontal:12, paddingVertical:9, zIndex:9999, elevation:12},
+  widgetReopenText:{fontFamily:FONT, fontSize:11, fontWeight:'700', color:'#fff', letterSpacing:1},
+
+  // ── Modals ──
+  overlay:    {flex:1, backgroundColor:'rgba(0,0,0,0.65)', alignItems:'center', justifyContent:'center', padding:24},
+  modalCard:  {backgroundColor:'#f9f7f0', borderWidth:2, borderColor:'#999', padding:26, width:'100%', maxWidth:380},
+  modalDanger:{borderColor:'#c62828', borderWidth:3},
+  dangerIcon: {fontFamily:FONT, fontSize:44, color:'#c62828', textAlign:'center', marginBottom:8},
+  modalHeading:{fontFamily:FONT, fontSize:17, fontWeight:'700', color:INK, letterSpacing:1, textAlign:'center', marginBottom:4},
+  deleteInfoBox:{backgroundColor:'rgba(255,255,255,0.8)', borderWidth:2, borderColor:'#bbb', padding:12, marginBottom:12},
+  deleteTargetName:{fontFamily:FONT, fontSize:16, fontWeight:'700', color:INK, letterSpacing:0.5, marginTop:4},
+  deleteWarning:{fontFamily:FONT, fontSize:12, fontWeight:'700', color:'#c62828', textAlign:'center', letterSpacing:0.5, marginBottom:8, lineHeight:18},
+  areYouSure:  {fontFamily:FONT, fontSize:15, fontWeight:'700', color:INK, textAlign:'center', letterSpacing:1, marginBottom:18},
+  rowBtns:     {flexDirection:'row', gap:12},
+  modalBtn:    {flex:1, paddingVertical:15, alignItems:'center', borderWidth:3},
+  btnGreen:    {backgroundColor:'#2e7d32', borderColor:'#1b5e20'},
+  btnRed:      {backgroundColor:'#c62828', borderColor:'#8e0000'},
+  btnGray:     {backgroundColor:'#ddd', borderColor:'#aaa'},
+  btnDisabled: {backgroundColor:'#bbb', borderColor:'#aaa'},
+  modalBtnText:{fontFamily:FONT, fontSize:13, fontWeight:'700', color:'#fff', letterSpacing:0.5},
+});

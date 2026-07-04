@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "548888145990",
+    "project_id": "timecardapp-fd7ef",
+    "storage_bucket": "timecardapp-fd7ef.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:548888145990:android:93345b151a92c58bacda47",
+        "android_client_info": {
+          "package_name": "com.timecardapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "548888145990-kihrhokb6g1fpgn0j7f851afgm302kni.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.timecardapp",
+            "certificate_hash": "5e8f16062ea3cd2c4a0d547876baa6f38cabf625"
+          }
+        },
+        {
+          "client_id": "548888145990-iqiu823n8j179jsbhsutuhq46709ee55.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC4PWel-aa4ukWsuSgtzFGgKkOG8taKAZ4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "548888145990-iqiu823n8j179jsbhsutuhq46709ee55.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "548888145990-pd7ng9cpkkehca8q4mj9b9uoi10kfge3.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "org.reactjs.native.example.TimecardApp"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
